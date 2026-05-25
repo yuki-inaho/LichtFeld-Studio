@@ -102,6 +102,11 @@ namespace lfs::vis {
             bool force_input_upload,
             OutputSlot output_slot = OutputSlot::Main,
             bool synchronize_input_upload = false);
+        [[nodiscard]] std::expected<RenderResult, std::string> rerenderSelectionOverlay(
+            VulkanContext& context,
+            const lfs::core::SplatData& splat_data,
+            const lfs::rendering::ViewportRenderRequest& request,
+            OutputSlot output_slot = OutputSlot::Main);
         [[nodiscard]] std::expected<std::shared_ptr<lfs::core::Tensor>, std::string> readOutputImage(
             VulkanContext& context,
             OutputSlot output_slot = OutputSlot::Main) const;
@@ -222,7 +227,7 @@ namespace lfs::vis {
         };
 
         void detachManagedBuffers();
-        void plugRingInputs(std::size_t ring_slot, std::size_t num_splats);
+        void plugRingInputs(std::size_t ring_slot, std::size_t num_splats, bool reset_cached_raster_state);
         void aliasSortScratchToInputSlot(std::size_t ring_slot);
         void releaseInputSlot(VulkanContext& context, std::size_t ring_slot);
 

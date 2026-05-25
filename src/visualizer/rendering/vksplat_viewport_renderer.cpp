@@ -159,6 +159,15 @@ namespace lfs::vis {
             return static_cast<std::size_t>(slot);
         }
 
+        [[nodiscard]] bool hasDeviceBuffer(const _VulkanBuffer& buffer) {
+            return buffer.buffer != VK_NULL_HANDLE && buffer.size > 0;
+        }
+
+        template <typename T>
+        [[nodiscard]] bool hasDeviceBuffer(const Buffer<T>& buffer) {
+            return hasDeviceBuffer(buffer.deviceBuffer);
+        }
+
         struct ScopedStagingBuffer {
             VmaAllocator allocator = VK_NULL_HANDLE;
             VkBuffer buffer = VK_NULL_HANDLE;
@@ -984,7 +993,10 @@ namespace lfs::vis {
         detach(buffers_.opacity_raw.deviceBuffer);
     }
 
-    void VksplatViewportRenderer::plugRingInputs(const std::size_t ring_slot, const std::size_t num_splats) {
+    void VksplatViewportRenderer::plugRingInputs(
+        const std::size_t ring_slot,
+        const std::size_t num_splats,
+        const bool reset_cached_raster_state) {
         assert(ring_slot < cuda_inputs_.size());
         auto& slot = cuda_inputs_[ring_slot];
         // All raw input region views share one VkBuffer / one device allocation; only
@@ -1016,8 +1028,10 @@ namespace lfs::vis {
         buffers_.sh_coeffs.clear();
 
         buffers_.num_splats = num_splats;
-        buffers_.num_indices = 0;
-        buffers_.is_unsorted_1 = true;
+        if (reset_cached_raster_state) {
+            buffers_.num_indices = 0;
+            buffers_.is_unsorted_1 = true;
+        }
     }
 
     void VksplatViewportRenderer::aliasSortScratchToInputSlot(const std::size_t ring_slot) {
@@ -1515,6 +1529,7 @@ namespace lfs::vis {
         if (!layout) {
             return std::unexpected(layout.error());
         }
+        const bool input_snapshot_changed = force_upload || !inputsResident(splat_data, ring_slot);
 
         std::shared_ptr<VulkanExternalTensorStorage> means_storage, sh0_storage, shN_storage,
             rotations_storage, scaling_storage, opacity_storage;
@@ -1536,7 +1551,7 @@ namespace lfs::vis {
             means_storage && sh0_storage && shN_storage && rotations_storage &&
             scaling_storage && opacity_storage && !splat_data.has_deleted_mask();
 
-        const auto resize_host_shadows = [&] {
+        const auto resize_host_shadows = [&](const bool reset_cached_raster_state) {
             buffers_.xyz_ws.resize(layout->xyz_bytes / sizeof(float));
             buffers_.sh0.resize(layout->sh0_bytes / sizeof(float));
             buffers_.shN.resize(layout->shN_bytes / sizeof(float));
@@ -1546,8 +1561,10 @@ namespace lfs::vis {
             buffers_.scales_opacs.clear();
             buffers_.sh_coeffs.clear();
             buffers_.num_splats = n;
-            buffers_.num_indices = 0;
-            buffers_.is_unsorted_1 = true;
+            if (reset_cached_raster_state) {
+                buffers_.num_indices = 0;
+                buffers_.is_unsorted_1 = true;
+            }
         };
 
         if (can_bind_external) {
@@ -1607,7 +1624,7 @@ namespace lfs::vis {
                     opacity_storage->vkBuffer(), opacity_storage->bytes(), layout->opacity_bytes, opacity_storage->vkOffset());
                 buffers_.scales_opacs.deviceBuffer = {};
                 buffers_.sh_coeffs.deviceBuffer = {};
-                resize_host_shadows();
+                resize_host_shadows(input_snapshot_changed);
             }
 
             const cudaStream_t stream = splat_data.means_raw().stream();
@@ -1681,13 +1698,12 @@ namespace lfs::vis {
         bool upload_needed;
         {
             LOG_TIMER("prepareInputs.copy.inputs_resident_check");
-            upload_needed =
-                force_upload || !inputsResident(splat_data, ring_slot) || !slot_had_buffer;
+            upload_needed = input_snapshot_changed || !slot_had_buffer;
         }
 
         if (!upload_needed) {
             LOG_TIMER("prepareInputs.copy.plug_only");
-            plugRingInputs(ring_slot, n);
+            plugRingInputs(ring_slot, n, false);
             return InputBindingResult{.uses_temporary_upload_slot = true};
         }
 
@@ -1742,7 +1758,7 @@ namespace lfs::vis {
             LOG_TIMER("prepareInputs.copy.snapshot");
             ring_uploaded_[ring_slot] = makeModelInputSnapshot(splat_data);
         }
-        plugRingInputs(ring_slot, n);
+        plugRingInputs(ring_slot, n, true);
         return InputBindingResult{.uses_temporary_upload_slot = true};
     }
 
@@ -2679,6 +2695,141 @@ namespace lfs::vis {
         return slot.output_tensor;
     }
 
+    std::expected<VksplatViewportRenderer::RenderResult, std::string>
+    VksplatViewportRenderer::rerenderSelectionOverlay(
+        VulkanContext& context,
+        const lfs::core::SplatData& splat_data,
+        const lfs::rendering::ViewportRenderRequest& request,
+        const OutputSlot output_slot) {
+        const glm::ivec2 size = request.frame_view.size;
+        if (size.x <= 0 || size.y <= 0) {
+            return std::unexpected("VkSplat selection overlay received an invalid viewport size");
+        }
+        if (request.equirectangular && !request.gut) {
+            return std::unexpected("VkSplat equirectangular rendering requires the 3DGUT backend");
+        }
+        if (!context.externalMemoryInteropEnabled()) {
+            return std::unexpected("VkSplat selection overlay requires CUDA/Vulkan external-memory interop");
+        }
+        if (!initialized_ || context_ != &context) {
+            return std::unexpected("VkSplat selection overlay requested without reusable render state");
+        }
+
+        const auto& output = output_slots_[outputSlotIndex(output_slot)];
+        if (output.image.image == VK_NULL_HANDLE ||
+            output.image.view == VK_NULL_HANDLE ||
+            output.depth_image.image == VK_NULL_HANDLE ||
+            output.depth_image.view == VK_NULL_HANDLE ||
+            output.size != size) {
+            return std::unexpected("VkSplat selection overlay requested for an empty or mismatched output slot");
+        }
+
+        const auto num_splats = static_cast<std::size_t>(splat_data.size());
+        if (num_splats == 0 || buffers_.num_splats != num_splats) {
+            return std::unexpected("VkSplat selection overlay cached model does not match the current model");
+        }
+        if (buffers_.num_indices == 0 ||
+            !hasDeviceBuffer(buffers_.sorted_gauss_idx()) ||
+            !hasDeviceBuffer(buffers_.tile_ranges) ||
+            !hasDeviceBuffer(buffers_.xy_vs) ||
+            !hasDeviceBuffer(buffers_.inv_cov_vs_opacity) ||
+            !hasDeviceBuffer(buffers_.rgb) ||
+            !hasDeviceBuffer(buffers_.depths) ||
+            !hasDeviceBuffer(buffers_.overlay_flags)) {
+            return std::unexpected("VkSplat selection overlay cached raster state is unavailable");
+        }
+        if (request.gut &&
+            (!hasDeviceBuffer(buffers_.xyz_ws) ||
+             !hasDeviceBuffer(buffers_.rotations) ||
+             !hasDeviceBuffer(buffers_.scaling_raw) ||
+             !hasDeviceBuffer(buffers_.opacity_raw))) {
+            return std::unexpected("VkSplat 3DGUT selection overlay cached model inputs are unavailable");
+        }
+
+        constexpr std::size_t ring_slot = 0;
+        auto overlay_bindings = [&] {
+            LOG_TIMER("vksplat.selection_overlay.uploadSelectionOverlay");
+            return uploadSelectionOverlay(context, request, num_splats, ring_slot);
+        }();
+        if (!overlay_bindings) {
+            return std::unexpected(overlay_bindings.error());
+        }
+
+        VulkanGSRendererUniforms uniforms{};
+        {
+            LOG_TIMER("vksplat.selection_overlay.populateUniforms");
+            const int active_sh_degree =
+                std::clamp(request.sh_degree, 0, std::min(3, splat_data.get_max_sh_degree()));
+            populateVksplatCameraUniforms(uniforms,
+                                          request.frame_view,
+                                          request.scene,
+                                          active_sh_degree,
+                                          lfs::core::sh_float4_slots_for_rest(
+                                              static_cast<std::uint32_t>(splat_data.max_sh_coeffs_rest())),
+                                          buffers_.num_splats,
+                                          request.equirectangular,
+                                          request.gut);
+            uniforms.step = static_cast<std::uint32_t>(modelTransformCount(request.scene.model_transforms));
+            uniforms.sort_capacity = static_cast<uint32_t>(
+                std::min<std::size_t>(buffers_.num_indices,
+                                      static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())));
+        }
+
+        std::expected<void, std::string> compose_status;
+        try {
+            LOG_TIMER("vksplat.selection_overlay.batch_total");
+            auto batch = DeviceGuard(&renderer_);
+            {
+                LOG_TIMER("vksplat.selection_overlay.record");
+                {
+                    LOG_TIMER("vksplat.selection_overlay.record.executeRasterizeForward");
+                    renderer_.executeRasterizeForward(uniforms,
+                                                      buffers_,
+                                                      overlay_bindings->selection_mask,
+                                                      overlay_bindings->preview_mask,
+                                                      overlay_bindings->selection_colors,
+                                                      buffers_.overlay_flags.deviceBuffer,
+                                                      overlay_bindings->overlay_params,
+                                                      overlay_bindings->transform_indices,
+                                                      overlay_bindings->model_transforms,
+                                                      request.gut);
+                }
+                {
+                    LOG_TIMER("vksplat.selection_overlay.record.composePixelState");
+                    compose_status = composePixelState(
+                        context,
+                        renderer_.activeCommandBuffer(),
+                        uniforms,
+                        request.frame_view.background_color,
+                        output_slot,
+                        request.transparent_background,
+                        request.depth_view,
+                        request.depth_view_min,
+                        request.depth_view_max);
+                }
+            }
+        } catch (const std::exception& e) {
+            return std::unexpected(std::format("VkSplat selection overlay pass failed: {}", e.what()));
+        }
+        if (!compose_status) {
+            return std::unexpected(compose_status.error());
+        }
+
+        const auto& updated_output = output_slots_[outputSlotIndex(output_slot)];
+        return RenderResult{
+            .image = updated_output.image.image,
+            .image_view = updated_output.image.view,
+            .image_layout = updated_output.layout,
+            .generation = updated_output.generation,
+            .depth_image = updated_output.depth_image.image,
+            .depth_image_view = updated_output.depth_image.view,
+            .depth_image_layout = updated_output.depth_layout,
+            .depth_generation = updated_output.generation,
+            .size = size,
+            .flip_y = false,
+        };
+    }
+
     std::expected<VksplatViewportRenderer::RenderResult, std::string> VksplatViewportRenderer::render(
         VulkanContext& context,
         const lfs::core::SplatData& splat_data,
@@ -2721,10 +2872,10 @@ namespace lfs::vis {
             renderer_.resetNumIndicesEstimate();
         }
         // Keep ring_slot's buffer + CUDA import alive across frames. Sort scratch
-        // will overlay this buffer (see aliasSortScratchToInputSlot), which
-        // invalidates the contents — but that path now clears ring_uploaded_ to
-        // force the next prepareInputs() to re-upload data into the still-alive
-        // buffer. Avoids ~3.7 ms/frame of destroy+create+import.
+        // can overlay this buffer (see aliasSortScratchToInputSlot), which
+        // invalidates the contents and forces the next prepareInputs() to
+        // re-upload into the still-alive buffer. Avoids ~3.7 ms/frame of
+        // destroy+create+import when no selection overlay rerender is expected.
         (void)input_binding;
 
         auto overlay_bindings = [&] {
@@ -2757,9 +2908,25 @@ namespace lfs::vis {
             uniforms.step = static_cast<std::uint32_t>(modelTransformCount(request.scene.model_transforms));
         }
 
-        if (input_binding->uses_temporary_upload_slot && !request.gut) {
+        const bool selection_overlay_may_rerender =
+            request.overlay.cursor.enabled ||
+            request.overlay.emphasis.transient_mask.mask != nullptr ||
+            request.overlay.emphasis.focused_gaussian_id >= 0;
+        if (input_binding->uses_temporary_upload_slot && !request.gut && !selection_overlay_may_rerender) {
             LOG_TIMER("vksplat.render.aliasSortScratch");
             aliasSortScratchToInputSlot(ring_slot);
+        } else if (input_binding->uses_temporary_upload_slot && !request.gut) {
+            const VkBuffer input_buffer = cuda_inputs_[ring_slot].buffer.buffer;
+            const auto detach_alias = [input_buffer](auto& buffer) {
+                auto& device_buffer = buffer.deviceBuffer;
+                if (device_buffer.buffer == input_buffer && device_buffer.allocation == VK_NULL_HANDLE) {
+                    device_buffer = {};
+                }
+            };
+            detach_alias(buffers_.sorting_keys_1);
+            detach_alias(buffers_.sorting_keys_2);
+            detach_alias(buffers_.sorting_gauss_idx_1);
+            detach_alias(buffers_.sorting_gauss_idx_2);
         }
 
         std::expected<void, std::string> compose_status;

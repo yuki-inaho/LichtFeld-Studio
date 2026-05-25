@@ -1321,28 +1321,19 @@ namespace lfs::vis {
                     if (!vksplat_viewport_renderer_) {
                         vksplat_viewport_renderer_ = std::make_unique<VksplatViewportRenderer>();
                     }
-                    const bool force_input_upload = (frame_dirty & DirtyFlag::SPLATS) != 0;
-                    LOG_TIMER("vksplat.render");
-                    auto render_result = vksplat_viewport_renderer_->render(
-                        *context.vulkan_context,
-                        *model,
-                        request,
-                        force_input_upload,
-                        VksplatViewportRenderer::OutputSlot::Main,
-                        synchronize_vksplat_input_upload);
-                    if (render_result) {
+                    const auto publish_vksplat_result = [&](const VksplatViewportRenderer::RenderResult& render_result) -> VulkanFrameResult {
                         render_lock.reset();
                         vulkan_viewport_image_.reset();
-                        vulkan_external_viewport_image_ = render_result->image;
-                        vulkan_external_viewport_image_view_ = render_result->image_view;
-                        vulkan_external_viewport_image_layout_ = render_result->image_layout;
-                        vulkan_external_viewport_image_generation_ = render_result->generation;
-                        vulkan_viewport_image_size_ = render_result->size;
-                        vulkan_viewport_image_flip_y_ = render_result->flip_y;
+                        vulkan_external_viewport_image_ = render_result.image;
+                        vulkan_external_viewport_image_view_ = render_result.image_view;
+                        vulkan_external_viewport_image_layout_ = render_result.image_layout;
+                        vulkan_external_viewport_image_generation_ = render_result.generation;
+                        vulkan_viewport_image_size_ = render_result.size;
+                        vulkan_viewport_image_flip_y_ = render_result.flip_y;
                         vulkan_gt_comparison_content_size_ = {0, 0};
                         lfs::rendering::FrameMetadata metadata{};
                         metadata.valid = true;
-                        metadata.flip_y = render_result->flip_y;
+                        metadata.flip_y = render_result.flip_y;
                         viewport_artifact_service_.setLazyCapture(
                             [this]() -> std::shared_ptr<lfs::core::Tensor> {
                                 if (!vksplat_viewport_renderer_ || !last_vulkan_context_) {
@@ -1358,7 +1349,7 @@ namespace lfs::vis {
                                 return std::move(*image);
                             },
                             metadata,
-                            render_result->size);
+                            render_result.size);
 
                         if (resize_result.completed) {
                             frame_lifecycle_service_.noteResizeCompleted();
@@ -1377,15 +1368,15 @@ namespace lfs::vis {
                         const bool publish_mesh_frame =
                             !frame_ctx.scene_state.meshes.empty() ||
                             environmentBackgroundEnabled(settings_) ||
-                            render_result->depth_image_view != VK_NULL_HANDLE;
+                            render_result.depth_image_view != VK_NULL_HANDLE;
                         if (publish_mesh_frame) {
                             auto mesh_frame = populateMeshFrame(frame_ctx, settings_, pending_split_view);
                             populate_independent_split_mesh_panels(mesh_frame);
-                            if (render_result->depth_image_view != VK_NULL_HANDLE) {
-                                mesh_frame.depth_blit.external_image_view = render_result->depth_image_view;
-                                mesh_frame.depth_blit.external_image_generation = render_result->depth_generation;
+                            if (render_result.depth_image_view != VK_NULL_HANDLE) {
+                                mesh_frame.depth_blit.external_image_view = render_result.depth_image_view;
+                                mesh_frame.depth_blit.external_image_generation = render_result.depth_generation;
                                 mesh_frame.depth_blit.depth_is_ndc = false;
-                                mesh_frame.depth_blit.flip_y = render_result->flip_y;
+                                mesh_frame.depth_blit.flip_y = render_result.flip_y;
                                 mesh_frame.depth_blit.near_plane = request.frame_view.near_plane > 0.0f
                                                                        ? request.frame_view.near_plane
                                                                        : 0.1f;
@@ -1405,6 +1396,38 @@ namespace lfs::vis {
                                 .external_image_generation = vulkan_external_viewport_image_generation_,
                                 .size = vulkan_viewport_image_size_,
                                 .flip_y = vulkan_viewport_image_flip_y_};
+                    };
+
+                    const bool can_rerender_selection_overlay =
+                        frame_dirty == DirtyFlag::SELECTION &&
+                        vulkan_external_viewport_image_ != VK_NULL_HANDLE &&
+                        vulkan_viewport_image_size_ == render_size &&
+                        !split_view_service_.isActive(settings_);
+                    if (can_rerender_selection_overlay) {
+                        LOG_TIMER("vksplat.selection_overlay");
+                        auto overlay_result = vksplat_viewport_renderer_->rerenderSelectionOverlay(
+                            *context.vulkan_context,
+                            *model,
+                            request,
+                            VksplatViewportRenderer::OutputSlot::Main);
+                        if (overlay_result) {
+                            return publish_vksplat_result(*overlay_result);
+                        }
+                        LOG_DEBUG("VkSplat selection overlay fast path unavailable: {}",
+                                  overlay_result.error());
+                    }
+
+                    const bool force_input_upload = (frame_dirty & DirtyFlag::SPLATS) != 0;
+                    LOG_TIMER("vksplat.render");
+                    auto render_result = vksplat_viewport_renderer_->render(
+                        *context.vulkan_context,
+                        *model,
+                        request,
+                        force_input_upload,
+                        VksplatViewportRenderer::OutputSlot::Main,
+                        synchronize_vksplat_input_upload);
+                    if (render_result) {
+                        return publish_vksplat_result(*render_result);
                     }
                     render_error = render_result.error();
                 }
