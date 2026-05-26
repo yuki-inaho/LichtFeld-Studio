@@ -14,7 +14,7 @@ body {
     overflow: hidden;
 }
 
-#menu-items {
+#menu-row {
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -22,6 +22,22 @@ body {
     height: 30dp;
     min-height: 30dp;
     max-height: 30dp;
+}
+
+#brand-logo {
+    flex: none;
+    margin-left: 12dp;
+    margin-right: 16dp;
+    height: 18dp;
+    decorator: none;
+}
+
+#menu-items {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex: 1;
+    height: 30dp;
 }
 
 .menu-label {

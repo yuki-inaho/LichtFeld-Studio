@@ -121,6 +121,7 @@ namespace lfs::vis::gui {
         Rml::Element* menu_items_ = nullptr;
         Rml::Element* dropdown_container_ = nullptr;
         Rml::Element* dropdown_overlay_ = nullptr;
+        Rml::Element* brand_logo_ = nullptr;
 
         int open_menu_index_ = -1;
         std::string open_menu_idname_;

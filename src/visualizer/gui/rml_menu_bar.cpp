@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/rml_menu_bar.hpp"
+#include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "gui/rmlui/rml_document_utils.hpp"
 #include "gui/rmlui/rml_theme.hpp"
@@ -238,6 +239,7 @@ namespace lfs::vis::gui {
         menu_items_ = document_->GetElementById("menu-items");
         dropdown_overlay_ = document_->GetElementById("dropdown-overlay");
         dropdown_container_ = document_->GetElementById("dropdown-container");
+        brand_logo_ = document_->GetElementById("brand-logo");
 
         render_needed_ = true;
         updateTheme();
@@ -255,6 +257,7 @@ namespace lfs::vis::gui {
         menu_items_ = nullptr;
         dropdown_container_ = nullptr;
         dropdown_overlay_ = nullptr;
+        brand_logo_ = nullptr;
     }
 
     void RmlMenuBar::suspend() {
@@ -283,6 +286,7 @@ namespace lfs::vis::gui {
         menu_items_ = nullptr;
         dropdown_container_ = nullptr;
         dropdown_overlay_ = nullptr;
+        brand_logo_ = nullptr;
         base_rcss_.clear();
         has_theme_signature_ = false;
         wants_input_ = false;
@@ -308,6 +312,7 @@ namespace lfs::vis::gui {
         menu_items_ = document_->GetElementById("menu-items");
         dropdown_overlay_ = document_->GetElementById("dropdown-overlay");
         dropdown_container_ = document_->GetElementById("dropdown-container");
+        brand_logo_ = document_->GetElementById("brand-logo");
 
         rebuildLabels();
         menu_model_.DirtyVariable("dropdown_items");
@@ -541,6 +546,20 @@ namespace lfs::vis::gui {
             base_rcss_ = rml_theme::loadBaseRCSS("rmlui/menubar.rcss");
 
         rml_theme::applyTheme(document_, base_rcss_, rml_theme::loadBaseRCSS("rmlui/menubar.theme.rcss"));
+
+        if (brand_logo_) {
+            const bool is_light = theme().isLightTheme();
+            const auto logo_path = lfs::vis::getAssetPath(
+                is_light ? "lichtfeld-splash-logo-dark.png" : "lichtfeld-splash-logo.png");
+            brand_logo_->SetAttribute("src", rml_theme::pathToRmlImageSource(logo_path));
+            auto [w, h, c] = lfs::core::get_image_info(logo_path);
+            if (w > 0 && h > 0) {
+                constexpr float kTargetHeightDp = 18.0f;
+                const float scale = kTargetHeightDp / static_cast<float>(h);
+                brand_logo_->SetProperty("width", std::format("{:.0f}dp", w * scale));
+                brand_logo_->SetProperty("height", std::format("{:.0f}dp", kTargetHeightDp));
+            }
+        }
         return true;
     }
 

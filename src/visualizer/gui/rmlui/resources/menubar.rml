@@ -3,11 +3,14 @@
     <link type="text/rcss" href="menubar.rcss"/>
 </head>
 <body id="body" data-model="menu_bar">
-    <div id="menu-items">
-        <span class="menu-label"
-              data-for="menu : menu_labels"
-              data-class-active="menu.active"
-              data-attr-data-index="menu.index">{{ menu.label }}</span>
+    <div id="menu-row">
+        <img id="brand-logo" />
+        <div id="menu-items">
+            <span class="menu-label"
+                  data-for="menu : menu_labels"
+                  data-class-active="menu.active"
+                  data-attr-data-index="menu.index">{{ menu.label }}</span>
+        </div>
     </div>
     <div id="bottom-border"></div>
     <div id="dropdown-overlay"></div>
