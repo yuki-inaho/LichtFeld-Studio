@@ -11,6 +11,7 @@ from . import rml_widgets as w
 from .scrub_fields import ScrubFieldController, ScrubFieldSpec
 from .transform_controls import TransformControlsController
 from .types import Panel
+from .ui.state import AppState
 
 __lfs_panel_classes__ = ["RenderingPanel"]
 __lfs_panel_ids__ = ["lfs.rendering"]
@@ -232,6 +233,7 @@ class RenderingPanel(Panel):
     template = "rmlui/rendering.rml"
     height_mode = lf.ui.PanelHeightMode.CONTENT
     update_interval_ms = 16
+    update_policy = "dirty"
 
     def __init__(self):
         self._handle = None
@@ -264,6 +266,7 @@ class RenderingPanel(Panel):
             self._get_scrub_value,
             self._set_scrub_value,
         )
+        self._reactive_unsubscribers = []
 
     def _sync_panel_label(self):
         label = tr("window.rendering")
@@ -296,6 +299,35 @@ class RenderingPanel(Panel):
         self._scrub_fields.mount(doc)
         self._transform_controls.mount(doc)
         self._sync_section_states()
+        self._subscribe_reactive_state()
+
+    def _subscribe_reactive_state(self):
+        if self._reactive_unsubscribers:
+            return
+
+        signals = (
+            AppState.scene_generation,
+            AppState.selection_generation,
+            AppState.active_tool,
+            AppState.transform_space,
+            AppState.pivot_mode,
+        )
+        self._reactive_unsubscribers = [
+            signal.subscribe(lambda _value: self._request_reactive_update())
+            for signal in signals
+        ]
+
+    def _unsubscribe_reactive_state(self):
+        for unsubscribe in self._reactive_unsubscribers:
+            try:
+                unsubscribe()
+            except Exception:
+                pass
+        self._reactive_unsubscribers = []
+
+    def _request_reactive_update(self):
+        if self._handle:
+            self._handle.dirty_all()
 
     def on_bind_model(self, ctx):
         model = ctx.create_data_model("rendering")
@@ -717,6 +749,7 @@ class RenderingPanel(Panel):
             self._handle.dirty_all()
 
     def on_unmount(self, doc):
+        self._unsubscribe_reactive_state()
         doc.remove_data_model("rendering")
         self._handle = None
         self._transform_controls.unmount()

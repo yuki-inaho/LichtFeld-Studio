@@ -1148,8 +1148,13 @@ namespace lfs::vis {
             return true;
 
         const auto targets = window_manager_->inputRouter().pointerTargets(input.mouse_x, input.mouse_y);
-        return targets.hover_target == input::InputTarget::Gui ||
-               targets.pointer_target == input::InputTarget::Gui;
+        const bool targets_gui = targets.hover_target == input::InputTarget::Gui ||
+                                 targets.pointer_target == input::InputTarget::Gui;
+        if (!targets_gui)
+            return false;
+
+        return !gui_manager_ ||
+               gui_manager_->passiveMouseMoveNeedsRender(input.mouse_x, input.mouse_y);
     }
 
     VisualizerImpl::FrameDemand VisualizerImpl::collectFrameDemand(const bool viewport_export_locked) {

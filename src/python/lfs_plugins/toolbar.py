@@ -251,6 +251,12 @@ class _GizmoToolbarController:
                 transform_space = self._TRANSFORM_SPACE_IDS.get(value, -1)
                 if transform_space >= 0:
                     lf.ui.set_transform_space(transform_space)
+                    try:
+                        from .ui.state import AppState
+
+                        AppState.transform_space.value = transform_space
+                    except Exception:
+                        pass
             else:
                 lf.ui.set_selection_mode(value)
             return
@@ -259,6 +265,12 @@ class _GizmoToolbarController:
             pivot_mode = self._PIVOT_IDS.get(value, -1)
             if pivot_mode >= 0:
                 lf.ui.set_pivot_mode(pivot_mode)
+                try:
+                    from .ui.state import AppState
+
+                    AppState.pivot_mode.value = pivot_mode
+                except Exception:
+                    pass
 
 
 class _UtilityToolbarController:

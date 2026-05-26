@@ -53,6 +53,9 @@ namespace lfs::vis::gui {
         // Returns true if the document changed and needs a fresh paint.
         bool apply(Rml::Element* body, int mouse_x, int mouse_y,
                    int doc_w, int doc_h);
+        [[nodiscard]] bool hasActiveState() const {
+            return seen_this_frame_ || visible_ || pending_target_ != nullptr || !pending_text_.empty();
+        }
 
     private:
         std::string pending_text_;

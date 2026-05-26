@@ -649,6 +649,45 @@ namespace lfs::vis::gui {
             rml_context_->ProcessMouseButtonUp(0, mods);
     }
 
+    void RmlStatusBar::queueVulkanContext(const float x, const float y,
+                                          const float w_px, const float h_px,
+                                          const int screen_w, const int screen_h) {
+        if (!rml_manager_ || !rml_manager_->getVulkanRenderInterface())
+            return;
+
+        const auto blit_rect = toFramebufferBlitRect(rml_manager_->getWindow(),
+                                                     x, y, w_px, h_px, screen_w, screen_h);
+        rml_manager_->queueVulkanContext(rml_context_, blit_rect.x, blit_rect.y,
+                                         false,
+                                         true,
+                                         blit_rect.x,
+                                         blit_rect.y,
+                                         blit_rect.x + blit_rect.w,
+                                         blit_rect.y + blit_rect.h);
+    }
+
+    void RmlStatusBar::renderCached(const PanelDrawContext& ctx, const float x, const float y,
+                                    const float w_px, const float h_px,
+                                    const int screen_w, const int screen_h) {
+        if (!rml_context_ || !document_)
+            return;
+        if (w_px <= 0.0f || h_px <= 0.0f || screen_w <= 0 || screen_h <= 0)
+            return;
+
+        const int render_w = static_cast<int>(w_px);
+        const int render_h = static_cast<int>(h_px);
+        const bool theme_current =
+            has_theme_signature_ && rml_theme::currentThemeSignature() == last_theme_signature_;
+        const bool can_reuse = theme_current && !model_dirty_ && !animation_active_ &&
+                               render_w == last_render_w_ && render_h == last_render_h_;
+        if (!can_reuse) {
+            render(ctx, x, y, w_px, h_px, screen_w, screen_h);
+            return;
+        }
+
+        queueVulkanContext(x, y, w_px, h_px, screen_w, screen_h);
+    }
+
     void RmlStatusBar::render(const PanelDrawContext& ctx, const float x, const float y,
                               const float w_px, const float h_px,
                               const int screen_w, const int screen_h) {
@@ -658,8 +697,6 @@ namespace lfs::vis::gui {
         if (w_px <= 0.0f || h_px <= 0.0f || screen_w <= 0 || screen_h <= 0)
             return;
 
-        const auto blit_rect = toFramebufferBlitRect(rml_manager_ ? rml_manager_->getWindow() : nullptr,
-                                                     x, y, w_px, h_px, screen_w, screen_h);
         const int render_w = static_cast<int>(w_px);
         const int render_h = static_cast<int>(h_px);
         const bool size_changed = (render_w != last_render_w_ || render_h != last_render_h_);
@@ -690,13 +727,7 @@ namespace lfs::vis::gui {
             last_render_h_ = render_h;
         }
 
-        rml_manager_->queueVulkanContext(rml_context_, blit_rect.x, blit_rect.y,
-                                         false,
-                                         true,
-                                         blit_rect.x,
-                                         blit_rect.y,
-                                         blit_rect.x + blit_rect.w,
-                                         blit_rect.y + blit_rect.h);
+        queueVulkanContext(x, y, w_px, h_px, screen_w, screen_h);
     }
 
 } // namespace lfs::vis::gui

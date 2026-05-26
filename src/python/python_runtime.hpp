@@ -615,6 +615,7 @@ namespace lfs::python {
         void (*destroy)(void* host);
         void (*draw)(void* host, const void* draw_ctx);
         void (*draw_direct)(void* host, float x, float y, float w, float h);
+        bool (*draw_direct_cached)(void* host, float x, float y, float w, float h);
         void (*prepare_direct)(void* host, float w, float h);
         void (*prepare_layout)(void* host, float w, float h);
         void* (*get_document)(void* host);

@@ -517,7 +517,6 @@ namespace lfs::vis::gui {
 
         if (forwardInput(pos_x, pos_y))
             render_needed_ = true;
-
         applyHoverTooltip(w, pos_y, display_h);
 
         renderIfDirty(w, h, display_h);
@@ -623,11 +622,30 @@ namespace lfs::vis::gui {
 
         if (forwardInput(x, y))
             render_needed_ = true;
-
         applyHoverTooltip(pw, y, display_h);
 
         renderIfDirty(pw, ph, display_h);
         compositeDirectToScreen(x, y, w, display_h);
+    }
+
+    bool RmlPanelHost::drawDirectCached(float x, float y, float w, float h) {
+        if (w <= 0 || h <= 0)
+            return false;
+        if (!document_ || !rml_context_ || last_fbo_w_ <= 0 || last_fbo_h_ <= 0)
+            return false;
+
+        const int pw = static_cast<int>(w);
+        if (pw != last_fbo_w_)
+            return false;
+
+        int ph = 0;
+        float display_h = 0.0f;
+        resolveDirectRenderHeight(h, ph, display_h);
+        if (ph <= 0 || display_h <= 0.0f || ph > last_fbo_h_)
+            return false;
+
+        compositeDirectToScreen(x, y, w, display_h);
+        return true;
     }
 
     std::optional<RmlPanelHost::ShadowRect> RmlPanelHost::collectVisibleColorPickerPopupShadow(
@@ -704,8 +722,14 @@ namespace lfs::vis::gui {
         if (clip_y_min_ >= 0.0f && clip_y_max_ > clip_y_min_)
             visible_h = std::min(visible_h, clip_y_max_ - panel_y);
         const int clamp_h = std::max(1, static_cast<int>(std::floor(visible_h)));
+        if (manager_)
+            manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_,
+                                                            tooltip_.hasActiveState());
         if (tooltip_.apply(body, last_forwarded_mx_, last_forwarded_my_, pw, clamp_h))
             render_needed_ = true;
+        if (manager_)
+            manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_,
+                                                            tooltip_.hasActiveState());
     }
 
     void RmlPanelHost::compositeDirectToScreen(const float x, const float y,
@@ -748,7 +772,7 @@ namespace lfs::vis::gui {
     }
 
     bool RmlPanelHost::hitTestPanelShape(const float local_x, const float local_y,
-                                         const float logical_w, const float logical_h) {
+                                         const float logical_w, const float logical_h) const {
         if (local_x < 0.0f || local_y < 0.0f || local_x >= logical_w || local_y >= logical_h)
             return false;
 
@@ -821,15 +845,16 @@ namespace lfs::vis::gui {
                     rml_context_->ProcessTextInput(static_cast<Rml::Character>(cp));
             }
         };
-        const auto blur_focused_element = [&]() {
+        const auto blur_focused_element = [&]() -> bool {
             auto* const focused = rml_context_->GetFocusElement();
             if (!focused)
-                return;
+                return false;
 
             if (rml_input::wantsTextInput(focused))
                 flush_pending_text_input();
             focused->Blur();
             sync_text_focus();
+            return true;
         };
 
         float local_x = mouse_x - panel_x;
@@ -860,22 +885,28 @@ namespace lfs::vis::gui {
         const int rml_my = static_cast<int>(local_y);
         const bool mouse_moved = hovered &&
                                  (rml_mx != last_forwarded_mx_ || rml_my != last_forwarded_my_);
-        if (mouse_moved) {
-            had_input = true;
-        }
 
-        if (input.mouse_clicked[0] || input.mouse_released[0] ||
+        const bool pointer_event =
+            input.mouse_clicked[0] || input.mouse_released[0] ||
             input.mouse_clicked[1] || input.mouse_released[1] ||
-            input.mouse_wheel != 0.0f)
+            input.mouse_wheel != 0.0f;
+        const bool pointer_active =
+            pointer_event ||
+            input.mouse_down[0] || input.mouse_down[1] || input.mouse_down[2];
+        if (hovered && pointer_event)
             had_input = true;
 
         const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
                                       input.key_alt, input.key_super);
 
         if (mouse_moved) {
+            auto* const prev_hover = rml_context_->GetHoverElement();
             last_forwarded_mx_ = rml_mx;
             last_forwarded_my_ = rml_my;
             rml_context_->ProcessMouseMove(rml_mx, rml_my, mods);
+            auto* const next_hover = rml_context_->GetHoverElement();
+            if (pointer_active || next_hover != prev_hover)
+                had_input = true;
         }
         if (hovered) {
             if (input.mouse_clicked[0])
@@ -894,7 +925,7 @@ namespace lfs::vis::gui {
             if (input.mouse_clicked[0])
                 sync_text_focus();
         } else if (input.mouse_clicked[0]) {
-            blur_focused_element();
+            had_input |= blur_focused_element();
         }
 
         if (hovered) {
@@ -902,9 +933,8 @@ namespace lfs::vis::gui {
                 tooltip_.setHover(resolveRmlTooltip(hover), hover);
         }
 
-        if (input.viewport_keyboard_focus) {
-            blur_focused_element();
-        }
+        if (input.viewport_keyboard_focus)
+            had_input |= blur_focused_element();
 
         bool forward_keys =
             rml_input::hasFocusedKeyboardTarget(rml_context_->GetFocusElement()) &&

@@ -379,7 +379,7 @@ class TrainingPanel(Panel):
     order = 20
     template = "rmlui/training.rml"
     height_mode = lf.ui.PanelHeightMode.CONTENT
-    update_interval_ms = 16
+    update_interval_ms = 100
 
     def __init__(self):
         self._handle = None

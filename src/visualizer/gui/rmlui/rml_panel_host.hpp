@@ -40,6 +40,7 @@ namespace lfs::vis::gui {
         void draw(const PanelDrawContext& ctx, float avail_w, float avail_h,
                   float pos_x, float pos_y);
         void drawDirect(float x, float y, float w, float h);
+        bool drawDirectCached(float x, float y, float w, float h);
         void prepareDirect(float w, float h);
         void syncDirectLayout(float w, float h);
         bool ensureContext();
@@ -83,7 +84,7 @@ namespace lfs::vis::gui {
         std::optional<ShadowRect> collectVisibleColorPickerPopupShadow(float panel_screen_x,
                                                                        float panel_screen_y) const;
         void applyHoverTooltip(int pw, float panel_y, float display_h);
-        bool hitTestPanelShape(float local_x, float local_y, float logical_w, float logical_h);
+        bool hitTestPanelShape(float local_x, float local_y, float logical_w, float logical_h) const;
         bool forwardInput(float panel_x, float panel_y);
         bool syncThemeProperties();
         bool loadDocument();

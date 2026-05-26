@@ -3111,6 +3111,10 @@ namespace lfs::vis::gui {
         rml_viewport_overlay_.init(&rmlui_manager_);
         rml_menu_bar_.init(&rmlui_manager_);
         rml_status_bar_.init(&rmlui_manager_);
+        if (global_context_menu_)
+            global_context_menu_->preload();
+        if (rml_modal_overlay_)
+            rml_modal_overlay_->preload();
 
         lfs::python::RmlPanelHostOps ops{};
         ops.create = [](void* mgr, const char* name, const char* rml,
@@ -3155,6 +3159,9 @@ namespace lfs::vis::gui {
             }
             hp->drawDirect(x, y, w, h);
             hp->setInput(nullptr);
+        };
+        ops.draw_direct_cached = [](void* host, float x, float y, float w, float h) -> bool {
+            return static_cast<RmlPanelHost*>(host)->drawDirectCached(x, y, w, h);
         };
         ops.prepare_direct = [](void* host, float w, float h) {
             auto* hp = static_cast<RmlPanelHost*>(host);
@@ -3255,14 +3262,16 @@ namespace lfs::vis::gui {
 #endif
     }
 
-    std::pair<bool, bool> GuiManager::scanDevResourceFiles(const bool detect_changes) {
+    GuiManager::DevResourceScanResult GuiManager::scanDevResourceFilesSnapshot(
+        std::filesystem::path rml_dir,
+        std::filesystem::path locale_dir,
+        std::unordered_map<std::string, std::filesystem::file_time_type> previous_times,
+        const bool detect_changes) {
+        DevResourceScanResult result;
         std::unordered_map<std::string, std::filesystem::file_time_type> next_times;
-        bool rml_changed = false;
-        bool locale_changed = false;
-        bool scan_failed = false;
 
         const auto scan_dir =
-            [&](const std::filesystem::path& dir, const bool locale_dir) {
+            [&](const std::filesystem::path& dir, const bool is_locale_dir) {
                 if (dir.empty())
                     return;
 
@@ -3270,7 +3279,7 @@ namespace lfs::vis::gui {
                 if (!std::filesystem::exists(dir, ec) || ec ||
                     !std::filesystem::is_directory(dir, ec) || ec) {
                     if (ec)
-                        scan_failed = true;
+                        result.scan_failed = true;
                     return;
                 }
 
@@ -3279,7 +3288,7 @@ namespace lfs::vis::gui {
                         dir, std::filesystem::directory_options::skip_permission_denied, ec);
                     const std::filesystem::recursive_directory_iterator end;
                     if (ec) {
-                        scan_failed = true;
+                        result.scan_failed = true;
                         return;
                     }
                     for (; !ec && it != end; it.increment(ec)) {
@@ -3288,7 +3297,7 @@ namespace lfs::vis::gui {
                             continue;
 
                         const auto kind = devResourceKindForPath(it->path());
-                        const bool watched = locale_dir
+                        const bool watched = is_locale_dir
                                                  ? kind == DevResourceKind::Locale
                                                  : kind == DevResourceKind::Rml;
                         if (!watched)
@@ -3304,45 +3313,102 @@ namespace lfs::vis::gui {
                         if (!detect_changes)
                             continue;
 
-                        const auto old = dev_resource_watch_.file_times.find(key);
-                        if (old == dev_resource_watch_.file_times.end() || old->second != mtime) {
-                            if (locale_dir)
-                                locale_changed = true;
+                        const auto old = previous_times.find(key);
+                        if (old == previous_times.end() || old->second != mtime) {
+                            if (is_locale_dir)
+                                result.locale_changed = true;
                             else
-                                rml_changed = true;
+                                result.rml_changed = true;
                         }
                     }
                     if (ec)
-                        scan_failed = true;
+                        result.scan_failed = true;
                 } catch (const std::filesystem::filesystem_error& e) {
-                    scan_failed = true;
+                    result.scan_failed = true;
                     LOG_WARN("Resource hot reload scan skipped for '{}': {}",
                              lfs::core::path_to_utf8(dir), e.what());
                 }
             };
 
-        scan_dir(dev_resource_watch_.rml_dir, false);
-        scan_dir(dev_resource_watch_.locale_dir, true);
+        scan_dir(rml_dir, false);
+        scan_dir(locale_dir, true);
 
-        if (scan_failed)
-            return {false, false};
+        if (result.scan_failed)
+            return result;
 
         if (detect_changes) {
-            for (const auto& [key, unused] : dev_resource_watch_.file_times) {
+            for (const auto& [key, unused] : previous_times) {
                 (void)unused;
                 if (next_times.contains(key))
                     continue;
 
                 const auto kind = devResourceKindForPath(lfs::core::utf8_to_path(key));
                 if (kind == DevResourceKind::Locale)
-                    locale_changed = true;
+                    result.locale_changed = true;
                 else if (kind == DevResourceKind::Rml)
-                    rml_changed = true;
+                    result.rml_changed = true;
             }
         }
 
-        dev_resource_watch_.file_times = std::move(next_times);
-        return {rml_changed, locale_changed};
+        result.file_times = std::move(next_times);
+        return result;
+    }
+
+    GuiManager::DevResourceScanResult GuiManager::scanDevResourceFiles(const bool detect_changes) {
+        auto result = scanDevResourceFilesSnapshot(dev_resource_watch_.rml_dir,
+                                                   dev_resource_watch_.locale_dir,
+                                                   dev_resource_watch_.file_times,
+                                                   detect_changes);
+        if (!result.scan_failed)
+            dev_resource_watch_.file_times = result.file_times;
+        return result;
+    }
+
+    void GuiManager::launchDevResourceScan() {
+        if (dev_resource_watch_.scan_future.valid())
+            return;
+
+        auto rml_dir = dev_resource_watch_.rml_dir;
+        auto locale_dir = dev_resource_watch_.locale_dir;
+        auto previous_times = dev_resource_watch_.file_times;
+        try {
+            dev_resource_watch_.scan_future =
+                std::async(std::launch::async,
+                           [rml_dir = std::move(rml_dir),
+                            locale_dir = std::move(locale_dir),
+                            previous_times = std::move(previous_times)]() mutable {
+                               return GuiManager::scanDevResourceFilesSnapshot(
+                                   std::move(rml_dir),
+                                   std::move(locale_dir),
+                                   std::move(previous_times),
+                                   true);
+                           });
+        } catch (const std::exception& e) {
+            LOG_WARN("Resource hot reload async scan could not start: {}", e.what());
+        }
+    }
+
+    bool GuiManager::consumeDevResourceScanResult() {
+        if (!dev_resource_watch_.scan_future.valid())
+            return false;
+
+        using namespace std::chrono_literals;
+        if (dev_resource_watch_.scan_future.wait_for(0ms) != std::future_status::ready)
+            return false;
+
+        DevResourceScanResult result;
+        try {
+            result = dev_resource_watch_.scan_future.get();
+        } catch (const std::exception& e) {
+            LOG_WARN("Resource hot reload async scan failed: {}", e.what());
+            return true;
+        }
+        if (!result.scan_failed) {
+            dev_resource_watch_.file_times = std::move(result.file_times);
+            dev_resource_watch_.pending_rml_reload |= result.rml_changed;
+            dev_resource_watch_.pending_locale_reload |= result.locale_changed;
+        }
+        return true;
     }
 
     bool GuiManager::reloadLocalizationResources() {
@@ -3415,41 +3481,44 @@ namespace lfs::vis::gui {
         if (!dev_resource_watch_.enabled)
             return;
 
+        consumeDevResourceScanResult();
+
+        if (dev_resource_watch_.pending_rml_reload ||
+            dev_resource_watch_.pending_locale_reload) {
+            if (shouldDeferDevResourceHotReload())
+                return;
+
+            const bool reload_rml = dev_resource_watch_.pending_rml_reload;
+            const bool reload_locale = dev_resource_watch_.pending_locale_reload;
+            dev_resource_watch_.pending_rml_reload = false;
+            dev_resource_watch_.pending_locale_reload = false;
+
+            if (reload_locale)
+                reloadLocalizationResources();
+            if (reload_rml || reload_locale)
+                reloadRmlResources();
+
+            LOG_INFO("Hot-reloaded dev resources{}{}",
+                     reload_rml ? " (RmlUI)" : "",
+                     reload_locale ? " (locales)" : "");
+        }
+
+        if (dev_resource_watch_.scan_future.valid())
+            return;
+
         const auto now = std::chrono::steady_clock::now();
         if (dev_resource_watch_.next_scan != std::chrono::steady_clock::time_point{} &&
             now < dev_resource_watch_.next_scan) {
             return;
         }
         dev_resource_watch_.next_scan = now + std::chrono::seconds(1);
-
-        const auto [rml_changed, locale_changed] = scanDevResourceFiles(true);
-        dev_resource_watch_.pending_rml_reload |= rml_changed;
-        dev_resource_watch_.pending_locale_reload |= locale_changed;
-
-        if (!dev_resource_watch_.pending_rml_reload &&
-            !dev_resource_watch_.pending_locale_reload) {
-            return;
-        }
-
-        if (shouldDeferDevResourceHotReload())
-            return;
-
-        const bool reload_rml = dev_resource_watch_.pending_rml_reload;
-        const bool reload_locale = dev_resource_watch_.pending_locale_reload;
-        dev_resource_watch_.pending_rml_reload = false;
-        dev_resource_watch_.pending_locale_reload = false;
-
-        if (reload_locale)
-            reloadLocalizationResources();
-        if (reload_rml || reload_locale)
-            reloadRmlResources();
-
-        LOG_INFO("Hot-reloaded dev resources{}{}",
-                 reload_rml ? " (RmlUI)" : "",
-                 reload_locale ? " (locales)" : "");
+        launchDevResourceScan();
     }
 
     void GuiManager::shutdown() {
+        if (dev_resource_watch_.scan_future.valid())
+            dev_resource_watch_.scan_future.wait();
+
         panel_layout_.saveState();
 
         if (video_widget_)
@@ -3463,8 +3532,10 @@ namespace lfs::vis::gui {
 
         lfs::python::shutdown_python_ui_resources();
         lfs::python::set_modal_enqueue_callback({});
+        lfs::python::set_global_context_menu(nullptr);
 
         rml_modal_overlay_.reset();
+        global_context_menu_.reset();
         panels::ShutdownPythonConsoleRml();
         rml_status_bar_.shutdown();
         rml_menu_bar_.shutdown();
@@ -4733,7 +4804,8 @@ namespace lfs::vis::gui {
             if (rml_menu_bar_.wantsInput())
                 guiFocusState().want_capture_mouse = true;
 
-            rml_menu_bar_.draw(menu_input.screen_w, menu_input.screen_h);
+            if (!vulkan_gui_)
+                rml_menu_bar_.draw(menu_input.screen_w, menu_input.screen_h);
         } else {
             LOG_TIMER("gui_render.panel_setup.menu_bar_suspend");
             rml_menu_bar_.suspend();
@@ -4934,8 +5006,13 @@ namespace lfs::vis::gui {
                                     panel_input.screen_x, panel_input.screen_y,
                                     panel_input.screen_w, panel_input.screen_h);
         }
-        panel_layout_.renderRightPanel(ctx, draw_ctx, show_main_panel_, ui_hidden_,
-                                       window_states_, focus_panel_name_, panel_input, screen);
+        if (block_underlay_input) {
+            panel_layout_.renderRightPanelCached(ctx, draw_ctx, show_main_panel_, ui_hidden_,
+                                                 window_states_, focus_panel_name_, panel_input, screen);
+        } else {
+            panel_layout_.renderRightPanel(ctx, draw_ctx, show_main_panel_, ui_hidden_,
+                                           window_states_, focus_panel_name_, panel_input, screen);
+        }
         panel_layout_.renderBottomDock(draw_ctx, show_main_panel_, ui_hidden_,
                                        panel_input, screen);
 
@@ -5034,7 +5111,8 @@ namespace lfs::vis::gui {
         }
         {
             LOG_TIMER("gui_render.rml_viewport_overlay.processInput");
-            rml_viewport_overlay_.processInput(panel_input);
+            if (!block_underlay_input)
+                rml_viewport_overlay_.processInput(panel_input);
         }
         if (rml_viewport_overlay_.wantsInput() && panel_input.mouse_clicked[0]) {
             if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
@@ -5079,7 +5157,10 @@ namespace lfs::vis::gui {
 
         {
             LOG_TIMER("gui_render.rml_viewport_overlay.render");
-            rml_viewport_overlay_.render();
+            if (block_underlay_input)
+                rml_viewport_overlay_.renderCached();
+            else
+                rml_viewport_overlay_.render();
         }
 
         applyFrameInputCapture();
@@ -5095,15 +5176,25 @@ namespace lfs::vis::gui {
             const float status_bar_x = screen.work_pos.x;
             const float status_bar_y = screen.work_pos.y + screen.work_size.y - status_bar_h;
             const float status_bar_w = screen.work_size.x;
-            rml_status_bar_.processInput(panel_input, status_bar_x, status_bar_y,
-                                         status_bar_w, status_bar_h);
-            rml_status_bar_.render(draw_ctx,
-                                   status_bar_x,
-                                   status_bar_y,
-                                   status_bar_w,
-                                   status_bar_h,
-                                   panel_input.screen_w,
-                                   panel_input.screen_h);
+            if (!block_underlay_input) {
+                rml_status_bar_.processInput(panel_input, status_bar_x, status_bar_y,
+                                             status_bar_w, status_bar_h);
+                rml_status_bar_.render(draw_ctx,
+                                       status_bar_x,
+                                       status_bar_y,
+                                       status_bar_w,
+                                       status_bar_h,
+                                       panel_input.screen_w,
+                                       panel_input.screen_h);
+            } else {
+                rml_status_bar_.renderCached(draw_ctx,
+                                             status_bar_x,
+                                             status_bar_y,
+                                             status_bar_w,
+                                             status_bar_h,
+                                             panel_input.screen_w,
+                                             panel_input.screen_h);
+            }
             reg.draw_panels(PanelSpace::StatusBar, draw_ctx, &panel_input);
         }
 
@@ -5127,15 +5218,26 @@ namespace lfs::vis::gui {
 
         if (vulkan_gui_) {
             LOG_TIMER("gui_render.menu_context_modal_render");
-            if (menu_bar_ && !ui_hidden_)
+            if (menu_bar_ && !ui_hidden_) {
+                LOG_TIMER("gui_render.menu_context_modal_render.menu_bar");
                 rml_menu_bar_.draw(panel_input.screen_w, panel_input.screen_h);
-            global_context_menu_->render(panel_input.screen_w, panel_input.screen_h,
-                                         panel_input.screen_x, panel_input.screen_y);
-            rml_modal_overlay_->render(panel_input.screen_w,
-                                       panel_input.screen_h,
-                                       panel_input.screen_x, panel_input.screen_y,
-                                       viewport_layout_.pos.x, viewport_layout_.pos.y,
-                                       viewport_layout_.size.x, viewport_layout_.size.y);
+            }
+            {
+                LOG_TIMER("gui_render.menu_context_modal_render.context_menu");
+                global_context_menu_->render(panel_input.screen_w, panel_input.screen_h,
+                                             panel_input.screen_x, panel_input.screen_y);
+            }
+            {
+                LOG_TIMER("gui_render.menu_context_modal_render.modal_overlay");
+                rml_modal_overlay_->render(panel_input.screen_w,
+                                           panel_input.screen_h,
+                                           panel_input.screen_x,
+                                           panel_input.screen_y,
+                                           viewport_layout_.pos.x,
+                                           viewport_layout_.pos.y,
+                                           viewport_layout_.size.x,
+                                           viewport_layout_.size.y);
+            }
         }
 
         // Was ImGui::Render(): the resulting ImDrawData was never submitted (no
@@ -5192,8 +5294,14 @@ namespace lfs::vis::gui {
                                                         frame.swapchain_image_view,
                                                         frame.depth_stencil_image_view,
                                                         frame.frame_slot)) {
-                        rmlui_manager_.renderQueuedVulkanContexts(false);
-                        rmlui_manager_.renderQueuedVulkanContexts(true);
+                        {
+                            LOG_TIMER("gui_render.rmlui_record.background");
+                            rmlui_manager_.renderQueuedVulkanContexts(false);
+                        }
+                        {
+                            LOG_TIMER("gui_render.rmlui_record.foreground");
+                            rmlui_manager_.renderQueuedVulkanContexts(true);
+                        }
                         rmlui_manager_.endVulkanFrame();
                     } else {
                         rmlui_manager_.clearVulkanQueue();
@@ -5947,6 +6055,18 @@ namespace lfs::vis::gui {
     bool GuiManager::isModalWindowOpen() const {
         return ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
                rml_modal_overlay_->isOpen();
+    }
+
+    bool GuiManager::passiveMouseMoveNeedsRender(const float mouse_x, const float mouse_y) const {
+        if (ui_hidden_)
+            return false;
+        const bool imgui_popup_open =
+            ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        if (isCapturingInput() || imgui_popup_open || startup_overlay_.isVisible() || drag_drop_hovering_) {
+            return true;
+        }
+
+        return rmlui_manager_.passiveMouseMoveNeedsRender(mouse_x, mouse_y);
     }
 
     void GuiManager::captureKey(int physical_key, int logical_key, int mods) {
