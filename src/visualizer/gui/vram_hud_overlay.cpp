@@ -710,13 +710,13 @@ namespace lfs::vis::gui {
         };
         const auto add_synthetic_row =
             [&](std::string label, const std::size_t bytes, const bool unaccounted = false) {
-            const std::size_t capped = std::min(bytes, synthetic_budget());
-            if (capped == 0) {
-                return;
-            }
-            tracked_total += capped;
-            entries.push_back({std::move(label), capped, unaccounted});
-        };
+                const std::size_t capped = std::min(bytes, synthetic_budget());
+                if (capped == 0) {
+                    return;
+                }
+                tracked_total += capped;
+                entries.push_back({std::move(label), capped, unaccounted});
+            };
         const auto add_hidden_synthetic = [&](const std::size_t bytes) {
             tracked_total += std::min(bytes, synthetic_budget());
         };
