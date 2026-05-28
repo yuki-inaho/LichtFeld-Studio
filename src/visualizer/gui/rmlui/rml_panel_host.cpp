@@ -793,6 +793,7 @@ namespace lfs::vis::gui {
                 .refresh = direct_cache_dirty_,
                 .foreground = foreground_,
                 .clip_enabled = true,
+                .cache_visible_region = true,
                 .clip = {
                     .x1 = screen_clip_x1,
                     .y1 = screen_clip_y1,

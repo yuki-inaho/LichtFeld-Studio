@@ -28,8 +28,10 @@
 #include <RmlUi/Core/Factory.h>
 #include <RmlUi/Core/Matrix4.h>
 #include <RmlUi/Debugger.h>
+#include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -566,6 +568,7 @@ namespace lfs::vis::gui {
             .draw_width = draw.draw_width,
             .draw_height = draw.draw_height,
             .refresh_cache = draw.refresh,
+            .cache_visible_region = draw.cache_visible_region,
         });
     }
 
@@ -616,18 +619,90 @@ namespace lfs::vis::gui {
             const std::string timer_name = std::string("gui_render.rmlui_record.") +
                                            (foreground ? "foreground.context." : "background.context.") +
                                            command.context_name;
-            // SaveLayerAsTexture clamps the captured region to the framebuffer, so a
-            // cache larger than the current frame would be stretched back to its
-            // requested size on blit (magnified). Render such oversized panels
-            // directly instead, exactly as the uncached path does.
-            const bool cache_exceeds_frame =
-                command.cache &&
-                (command.cache_width > static_cast<int>(vulkan_frame_extent_.width) ||
-                 command.cache_height > static_cast<int>(vulkan_frame_extent_.height));
-            if (cache_exceeds_frame && command.cache->texture != 0)
-                releaseCachedVulkanContext(*command.cache);
+            // Fixed overlays cache the full context at (0,0) and blit it
+            // (optionally scaled) to the draw rect. That would break scrollable
+            // panels whose content is taller than the framebuffer: SaveLayerAsTexture
+            // clamps the capture to the framebuffer and the blit would then stretch
+            // it back to full size (magnified). Such panels set cache_visible_region
+            // so we cache only the on-screen clipped window, which always fits the
+            // framebuffer and blits 1:1.
+            if (command.cache && command.cache_visible_region) {
+                const int fb_w = static_cast<int>(vulkan_frame_extent_.width);
+                const int fb_h = static_cast<int>(vulkan_frame_extent_.height);
+                const int left = std::clamp(static_cast<int>(std::floor(command.clip_x1)), 0, fb_w);
+                const int top = std::clamp(static_cast<int>(std::floor(command.clip_y1)), 0, fb_h);
+                const int right = std::clamp(static_cast<int>(std::ceil(command.clip_x2)), 0, fb_w);
+                const int bottom = std::clamp(static_cast<int>(std::ceil(command.clip_y2)), 0, fb_h);
+                const int vis_w = right - left;
+                const int vis_h = bottom - top;
+                const float fleft = static_cast<float>(left);
+                const float ftop = static_cast<float>(top);
+                const float fright = static_cast<float>(right);
+                const float fbottom = static_cast<float>(bottom);
 
-            if (command.cache && !cache_exceeds_frame) {
+                if (vis_w <= 0 || vis_h <= 0) {
+                    if (command.cache->texture != 0)
+                        releaseCachedVulkanContext(*command.cache);
+                } else {
+                    const bool region_changed =
+                        command.cache->width != vis_w || command.cache->height != vis_h ||
+                        std::abs(command.cache->offset_x - command.offset_x) > 0.5f ||
+                        std::abs(command.cache->offset_y - command.offset_y) > 0.5f ||
+                        std::abs(command.cache->clip_x1 - fleft) > 0.5f ||
+                        std::abs(command.cache->clip_y1 - ftop) > 0.5f;
+                    const bool refresh_cache =
+                        command.refresh_cache || command.cache->texture == 0 || region_changed;
+
+                    if (refresh_cache) {
+                        lfs::core::ScopedTimer timer(timer_name + ".cache_refresh", 0.25);
+                        if (command.cache->texture != 0)
+                            releaseCachedVulkanContext(*command.cache);
+
+                        vulkan_render_interface_->ResetContextRenderState();
+                        const Rml::LayerHandle layer = vulkan_render_interface_->PushLayer();
+                        if (layer != 0) {
+                            vulkan_render_interface_->SetContextOffset(command.offset_x, command.offset_y);
+                            vulkan_render_interface_->SetContextClipRect(fleft, ftop, fright, fbottom);
+                            command.context->Render();
+                            command.cache->texture = vulkan_render_interface_->SaveLayerAsTexture();
+                            vulkan_render_interface_->PopLayer();
+                            const bool saved = command.cache->texture != 0;
+                            command.cache->width = saved ? vis_w : 0;
+                            command.cache->height = saved ? vis_h : 0;
+                            command.cache->offset_x = command.offset_x;
+                            command.cache->offset_y = command.offset_y;
+                            command.cache->clip_x1 = fleft;
+                            command.cache->clip_y1 = ftop;
+                            command.cache->clip_x2 = fright;
+                            command.cache->clip_y2 = fbottom;
+                        }
+                    }
+
+                    if (command.cache->texture != 0) {
+                        const std::string blit_timer_name =
+                            std::string("gui_render.rmlui_record.") +
+                            (foreground ? "foreground.cached_context." : "background.cached_context.") +
+                            command.context_name;
+                        lfs::core::ScopedTimer timer(blit_timer_name, 0.25);
+                        vulkan_render_interface_->ResetContextRenderState();
+                        vulkan_render_interface_->SetContextClipRect(fleft, ftop, fright, fbottom);
+                        vulkan_render_interface_->RenderTextureQuad(command.cache->texture,
+                                                                    fleft,
+                                                                    ftop,
+                                                                    static_cast<float>(vis_w),
+                                                                    static_cast<float>(vis_h));
+                    } else {
+                        lfs::core::ScopedTimer timer(timer_name);
+                        vulkan_render_interface_->ResetContextRenderState();
+                        vulkan_render_interface_->SetContextClipRect(command.clip_x1,
+                                                                     command.clip_y1,
+                                                                     command.clip_x2,
+                                                                     command.clip_y2);
+                        vulkan_render_interface_->SetContextOffset(command.offset_x, command.offset_y);
+                        command.context->Render();
+                    }
+                }
+            } else if (command.cache) {
                 const bool refresh_cache =
                     command.refresh_cache ||
                     command.cache->texture == 0 ||

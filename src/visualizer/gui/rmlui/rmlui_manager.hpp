@@ -39,6 +39,14 @@ namespace lfs::vis::gui {
         Rml::TextureHandle texture = {};
         int width = 0;
         int height = 0;
+        // For visible-region caches: the panel offset and clipped window the
+        // texture was captured at. The cache is stale if any of these change.
+        float offset_x = 0.0f;
+        float offset_y = 0.0f;
+        float clip_x1 = 0.0f;
+        float clip_y1 = 0.0f;
+        float clip_x2 = 0.0f;
+        float clip_y2 = 0.0f;
     };
 
     struct RmlRect {
@@ -60,6 +68,9 @@ namespace lfs::vis::gui {
         bool refresh = false;
         bool foreground = false;
         bool clip_enabled = false;
+        // Cache only the clipped on-screen window instead of the full context.
+        // Used by scrollable panels whose content can exceed the framebuffer.
+        bool cache_visible_region = false;
         RmlRect clip;
     };
 
@@ -143,6 +154,7 @@ namespace lfs::vis::gui {
             float draw_width = 0.0f;
             float draw_height = 0.0f;
             bool refresh_cache = false;
+            bool cache_visible_region = false;
         };
 
         struct TrackedContextFrame {
