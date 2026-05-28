@@ -590,7 +590,8 @@ namespace lfs::vis::gui {
         const auto& ops = lfs::python::get_rml_panel_host_ops();
         if (ops.get_document) {
             auto* doc = static_cast<Rml::ElementDocument*>(ops.get_document(host_));
-            if (lfs::python::is_document_dirty(doc))
+            if (lfs::python::is_document_dirty(doc) ||
+                lfs::python::is_document_update_requested(doc))
                 return true;
         }
 

@@ -195,19 +195,36 @@ namespace lfs::python {
             }
         }
 
-        void mark_model_document_dirty(const std::string& model_name) {
+        // Models created via PyRmlContext::create_data_model (e.g. in on_bind_model,
+        // before the panel document is loaded) only register their context. Resolve
+        // the owning document lazily from the context and cache it, so dirty/update
+        // invalidation can find it.
+        Rml::ElementDocument* resolve_model_document(const std::string& model_name) {
             if (auto it = s_model_documents.find(model_name);
-                it != s_model_documents.end() && it->second) {
-                s_dirty_documents.insert(it->second);
+                it != s_model_documents.end() && it->second)
+                return it->second;
+            if (auto cit = s_model_contexts.find(model_name);
+                cit != s_model_contexts.end() && cit->second) {
+                Rml::Context* ctx = cit->second;
+                if (ctx->GetNumDocuments() > 0) {
+                    if (Rml::ElementDocument* doc = ctx->GetDocument(0)) {
+                        s_model_documents[model_name] = doc;
+                        return doc;
+                    }
+                }
             }
+            return nullptr;
+        }
+
+        void mark_model_document_dirty(const std::string& model_name) {
+            if (auto* doc = resolve_model_document(model_name))
+                s_dirty_documents.insert(doc);
             request_redraw();
         }
 
         void request_model_document_update(const std::string& model_name) {
-            if (auto it = s_model_documents.find(model_name);
-                it != s_model_documents.end() && it->second) {
-                s_update_requested_documents.insert(it->second);
-            }
+            if (auto* doc = resolve_model_document(model_name))
+                s_update_requested_documents.insert(doc);
             request_redraw();
         }
 
@@ -256,6 +273,10 @@ namespace lfs::python {
 
     bool is_document_dirty(Rml::ElementDocument* doc) {
         return doc && s_dirty_documents.contains(doc);
+    }
+
+    bool is_document_update_requested(Rml::ElementDocument* doc) {
+        return doc && s_update_requested_documents.contains(doc);
     }
 
     nb::object variant_to_python(const Rml::Variant& v) {
@@ -329,6 +350,7 @@ namespace lfs::python {
         s_model_storage.erase(name);
         s_active_handles.erase(name);
         s_model_contexts.erase(name);
+        s_model_documents.erase(name);
         return ctx_->RemoveDataModel(name);
     }
 
