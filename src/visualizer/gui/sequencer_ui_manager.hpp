@@ -15,6 +15,7 @@
 #include "io/loader.hpp"
 #include "sequencer/rml_sequencer_panel.hpp"
 #include "sequencer/sequencer_controller.hpp"
+#include <core/export.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -66,7 +67,7 @@ namespace lfs::vis {
             [[nodiscard]] float preferredFloatingHeight() const;
             // Serialized status of the active PLY sequence (empty when inactive).
             // Used by MCP tooling to verify playback/scrub behaviour.
-            [[nodiscard]] std::string plyPlayerStatusJson() const;
+            [[nodiscard]] LFS_VIS_API std::string plyPlayerStatusJson() const;
 
         private:
             void renderSequencerPanel(const UIContext& ctx, const ViewportLayout& viewport,
