@@ -670,6 +670,10 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     module, _hook_calls, _remove_calls = toolbar_module
     model = _DataModelStub()
     lf_stub = sys.modules["lichtfeld"]
+    panel_enabled = {
+        "lfs.asset_manager": True,
+        "lfs.input_settings": True,
+    }
 
     lf_stub.RenderMode = SimpleNamespace(
         SPLATS="splats",
@@ -693,13 +697,22 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     monkeypatch.setattr(
         lf_stub.ui,
         "tr",
-        lambda key: {"toolbar.asset_manager": "Assets"}.get(key, key),
+        lambda key: {
+            "toolbar.asset_manager": "Assets",
+            "window.input_settings": "Input",
+        }.get(key, key),
         raising=False,
     )
     monkeypatch.setattr(
         lf_stub.ui,
         "is_panel_enabled",
-        lambda panel_id: panel_id == "lfs.asset_manager",
+        lambda panel_id: panel_enabled.get(panel_id, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        lf_stub.ui,
+        "set_panel_enabled",
+        lambda panel_id, enabled: panel_enabled.__setitem__(panel_id, enabled),
         raising=False,
     )
     monkeypatch.setattr(module, "histogram_mode_available", lambda _context: False)
@@ -717,15 +730,33 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     render_group = model.handle.record_updates["render_group_buttons"][0]
     assert len(camera_buttons) == 3
     assert [button["action"] for button in primary_buttons] == ["home", "fullscreen", "toggle_ui"]
-    assert [button["button_id"] for button in extra_buttons] == ["util-asset-manager", "util-sequencer"]
-    assert extra_buttons[0]["action"] == "toggle_panel"
-    assert extra_buttons[0]["value"] == "lfs.asset_manager"
-    assert extra_buttons[0]["icon_src"] == "../icon/archive.png"
-    assert extra_buttons[0]["tooltip_text"] == "Assets"
-    assert extra_buttons[0]["selected"] is True
+    assert [button["button_id"] for button in extra_buttons] == [
+        "util-input-settings",
+        "util-asset-manager",
+        "util-sequencer",
+    ]
+    input_settings = extra_buttons[0]
+    assert input_settings["action"] == "toggle_panel"
+    assert input_settings["value"] == "lfs.input_settings"
+    assert input_settings["icon_src"] == "../icon/settings.png"
+    assert input_settings["tooltip_text"] == "Input"
+    assert input_settings["selected"] is True
+    assert extra_buttons[1]["action"] == "toggle_panel"
+    assert extra_buttons[1]["value"] == "lfs.asset_manager"
+    assert extra_buttons[1]["icon_src"] == "../icon/archive.png"
+    assert extra_buttons[1]["tooltip_text"] == "Assets"
+    assert extra_buttons[1]["selected"] is True
     assert render_group["action"] == "render_group"
     assert render_group["icon_src"] == "../icon/blob.png"
     assert render_group["selected"] is False
+
+    model.handle.record_updates.clear()
+    model.bound_events["toolbar_action"](None, None, ["toggle_panel", "lfs.input_settings"])
+
+    assert panel_enabled["lfs.input_settings"] is False
+    extra_buttons = model.handle.record_updates["utility_extra_buttons"]
+    assert extra_buttons[0]["button_id"] == "util-input-settings"
+    assert extra_buttons[0]["selected"] is False
 
 
 def test_toolbar_tool_action_refreshes_button_records_immediately(toolbar_module, monkeypatch):

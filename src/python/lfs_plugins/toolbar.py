@@ -535,6 +535,7 @@ class _GizmoToolbarController:
 
 class _UtilityToolbarController:
     _ASSET_MANAGER_PANEL_ID = "lfs.asset_manager"
+    _INPUT_SETTINGS_PANEL_ID = "lfs.input_settings"
     _CAMERA_MODE_SPECS = (
         ("camera-orbit", "orbit", "Orbit Camera"),
         ("world", "trackball", "Free Orbit Camera"),
@@ -634,6 +635,15 @@ class _UtilityToolbarController:
         render_group_buttons = []
         projection_buttons = []
         utility_extra_buttons = [
+            _button_record(
+                "util-input-settings",
+                "toggle_panel",
+                self._INPUT_SETTINGS_PANEL_ID,
+                _icon_src("settings"),
+                tooltip_key="window.input_settings",
+                tooltip_text="Input Settings",
+                selected=_panel_enabled(self._INPUT_SETTINGS_PANEL_ID),
+            ),
             _button_record(
                 "util-asset-manager",
                 "toggle_panel",
@@ -1135,6 +1145,13 @@ class _ViewportToolbarController:
                 _UtilityToolbarController._ASSET_MANAGER_PANEL_ID,
             )
         )
+        input_settings_enabled = bool(
+            call(
+                False,
+                getattr(lf.ui, "is_panel_enabled", None),
+                _UtilityToolbarController._INPUT_SETTINGS_PANEL_ID,
+            )
+        )
         return (
             trainer_state,
             self._utility.active_group,
@@ -1157,6 +1174,7 @@ class _ViewportToolbarController:
             vram_profiler_enabled,
             bool(histogram_mode_available(ui_context)) if ui_context is not None else False,
             asset_manager_enabled,
+            input_settings_enabled,
             bool(call(False, getattr(lf.ui, "is_panel_enabled", None), "lfs.histogram")),
         )
 
