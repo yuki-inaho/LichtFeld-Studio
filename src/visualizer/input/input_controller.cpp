@@ -307,22 +307,27 @@ namespace lfs::vis {
 
         split_toggle_handler_id_ = cmd::ToggleSplitView::when([this](const auto&) {
             clearViewportDragState();
+            clearWasdMomentumViewport();
             focusSplitPanel(SplitViewPanelId::Left);
         });
         independent_split_toggle_handler_id_ = cmd::ToggleIndependentSplitView::when([this](const auto&) {
             clearViewportDragState();
+            clearWasdMomentumViewport();
             focusSplitPanel(SplitViewPanelId::Left);
         });
         gt_comparison_toggle_handler_id_ = cmd::ToggleGTComparison::when([this](const auto&) {
             clearViewportDragState();
+            clearWasdMomentumViewport();
             focusSplitPanel(SplitViewPanelId::Left);
         });
         scene_cleared_handler_id_ = state::SceneCleared::when([this](const auto&) {
             clearViewportDragState();
+            clearWasdMomentumViewport();
             focusSplitPanel(SplitViewPanelId::Left);
         });
         scene_loaded_handler_id_ = state::SceneLoaded::when([this](const auto&) {
             clearViewportDragState();
+            clearWasdMomentumViewport();
             focusSplitPanel(SplitViewPanelId::Left);
         });
 
@@ -332,6 +337,7 @@ namespace lfs::vis {
             press_selected_camera_frustum_ = false;
             pressed_camera_frustum_id_ = -1;
             std::fill(std::begin(keys_movement_), std::end(keys_movement_), false);
+            clearWasdMomentumViewport();
             hovered_camera_id_ = -1;
 
             // Clear ImGui input to prevent tooltip trails
@@ -1282,12 +1288,10 @@ namespace lfs::vis {
                 target_viewport->camera.rotateFpv(pos);
                 break;
             case DragMode::Orbit: {
-                float current_time = static_cast<float>(SDL_GetTicks() / 1000.0);
-                if (camera_navigation_mode_ == CameraNavigationMode::Trackball) {
-                    target_viewport->camera.updateTrackballRotateAroundCenter(pos, current_time);
-                } else {
-                    target_viewport->camera.updateRotateAroundCenter(pos, current_time);
-                }
+                const float current_time = static_cast<float>(SDL_GetTicks() / 1000.0f);
+                target_viewport->camera.orbitDrag(
+                    pos, camera_navigation_mode_ == CameraNavigationMode::Trackball, current_time);
+                orbit_coast_viewport_ = target_viewport;
                 break;
             }
             default:
@@ -1893,6 +1897,28 @@ namespace lfs::vis {
             keys_movement_[5] = false;
         }
 
+        // Orbit ease-out: while dragging, let a held-still pause fade the stored
+        // motion; once released, coast the remembered rotation to a smooth stop.
+        if (orbit_coast_viewport_) {
+            auto& orbit_camera = orbit_coast_viewport_->camera;
+            if (drag_mode_ == DragMode::Orbit) {
+                orbit_camera.decayOrbitMomentum(delta_time);
+            } else if (orbit_camera.hasOrbitMomentum()) {
+                orbit_camera.updateOrbitCoast(delta_time);
+                onCameraMovementStart();
+                publishCameraMove(orbit_coast_viewport_);
+                if (!orbit_camera.hasOrbitMomentum()) {
+                    ui::CameraMove{
+                        .rotation = orbit_coast_viewport_->getRotationMatrix(),
+                        .translation = orbit_coast_viewport_->getTranslation()}
+                        .emit();
+                    orbit_coast_viewport_ = nullptr;
+                }
+            } else {
+                orbit_coast_viewport_ = nullptr;
+            }
+        }
+
         // Drive the set-pivot recenter glide
         if (auto& glide_viewport = activeKeyboardViewport(); glide_viewport.camera.isGliding()) {
             const bool movement_keys_active = keys_movement_[0] || keys_movement_[1] || keys_movement_[2] ||
@@ -1912,36 +1938,49 @@ namespace lfs::vis {
             }
         }
 
-        // Handle continuous movement
-        if (shouldCameraHandleInput() && drag_mode_ != DragMode::Gizmo && drag_mode_ != DragMode::Splitter) {
-            auto& movement_viewport = activeKeyboardViewport();
-            const float movement_speed_bonus =
-                (getModifierKeys() & input::KEYMOD_SHIFT) != 0 ? kWasdShiftSpeedBonus : 0.0f;
-            if (keys_movement_[0]) {
-                movement_viewport.camera.advance_forward(delta_time, movement_speed_bonus);
+        // Handle continuous WASD movement. The camera carries a damped velocity,
+        // so motion eases in on press and glides to rest on release. Drive it
+        // every frame while momentum remains so a released key decays to zero.
+        auto* const active_movement_viewport = &activeKeyboardViewport();
+        const bool camera_can_move = shouldCameraHandleInput() &&
+                                     drag_mode_ != DragMode::Gizmo && drag_mode_ != DragMode::Splitter;
+        const bool keys_active = camera_can_move &&
+                                 (keys_movement_[0] || keys_movement_[1] || keys_movement_[2] ||
+                                  keys_movement_[3] || keys_movement_[4] || keys_movement_[5]);
+
+        if (keys_active) {
+            if (wasd_momentum_viewport_ && wasd_momentum_viewport_ != active_movement_viewport) {
+                wasd_momentum_viewport_->camera.clearWasdMomentum();
             }
-            if (keys_movement_[1]) {
-                movement_viewport.camera.advance_left(delta_time, movement_speed_bonus);
-            }
-            if (keys_movement_[2]) {
-                movement_viewport.camera.advance_backward(delta_time, movement_speed_bonus);
-            }
-            if (keys_movement_[3]) {
-                movement_viewport.camera.advance_right(delta_time, movement_speed_bonus);
-            }
-            if (keys_movement_[4]) {
-                movement_viewport.camera.advance_up(delta_time, movement_speed_bonus);
-            }
-            if (keys_movement_[5]) {
-                movement_viewport.camera.advance_down(delta_time, movement_speed_bonus);
-            }
+            wasd_momentum_viewport_ = active_movement_viewport;
         }
 
-        // Publish if moving (removed inertia check)
-        bool moving = keys_movement_[0] || keys_movement_[1] || keys_movement_[2] || keys_movement_[3] || keys_movement_[4] || keys_movement_[5];
-        if (moving) {
+        auto* const movement_viewport = keys_active ? active_movement_viewport : wasd_momentum_viewport_;
+        if (movement_viewport && (keys_active || movement_viewport->camera.hasWasdMomentum())) {
+            const float movement_speed_bonus =
+                (keys_active && (getModifierKeys() & input::KEYMOD_SHIFT) != 0) ? kWasdShiftSpeedBonus : 0.0f;
+            movement_viewport->camera.advanceWasd(
+                delta_time,
+                keys_active && keys_movement_[0],
+                keys_active && keys_movement_[2],
+                keys_active && keys_movement_[1],
+                keys_active && keys_movement_[3],
+                keys_active && keys_movement_[4],
+                keys_active && keys_movement_[5],
+                movement_speed_bonus);
+
             onCameraMovementStart();
-            publishCameraMove(&activeKeyboardViewport());
+            publishCameraMove(movement_viewport);
+
+            if (!keys_active && !movement_viewport->camera.hasWasdMomentum()) {
+                ui::CameraMove{
+                    .rotation = movement_viewport->getRotationMatrix(),
+                    .translation = movement_viewport->getTranslation()}
+                    .emit();
+                wasd_momentum_viewport_ = nullptr;
+            }
+        } else if (!keys_active) {
+            wasd_momentum_viewport_ = nullptr;
         }
 
         // Check if camera movement has timed out and should resume training
@@ -2108,9 +2147,7 @@ namespace lfs::vis {
         if (!std::isfinite(pivot_distance) || pivot_distance < 0.1f)
             pivot_distance = 5.0f;
 
-        target_viewport.camera.R = pose.rotation;
-        target_viewport.camera.t = pose.translation;
-        target_viewport.camera.resetRollTarget();
+        target_viewport.setViewMatrix(pose.rotation, pose.translation);
 
         target_viewport.camera.updatePivotFromCamera(pivot_distance);
 
@@ -2454,6 +2491,14 @@ namespace lfs::vis {
         }
     }
 
+    void InputController::clearWasdMomentumViewport() {
+        if (!wasd_momentum_viewport_) {
+            return;
+        }
+        wasd_momentum_viewport_->camera.clearWasdMomentum();
+        wasd_momentum_viewport_ = nullptr;
+    }
+
     bool InputController::canOpenSelectedCameraContextMenu(const int hovered_camera_uid) const {
         if (hovered_camera_uid < 0 || !tool_context_) {
             return false;
@@ -2635,6 +2680,11 @@ namespace lfs::vis {
         if (!target_viewport.camera.snapToNearestAxisView(
                 kAxisSnapAngleDegrees, &snapped_axis, nullptr)) {
             return false;
+        }
+
+        target_viewport.camera.clearOrbitMomentum();
+        if (&target_viewport == orbit_coast_viewport_) {
+            orbit_coast_viewport_ = nullptr;
         }
 
         if (auto* const rendering = services().renderingOrNull()) {

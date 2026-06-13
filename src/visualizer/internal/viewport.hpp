@@ -75,6 +75,7 @@ class Viewport {
             t = home_t;
             pivot = home_pivot;
             resetRollTarget();
+            clearTransientMotion();
         }
 
         void resetRollTarget() { roll_target = 0.0f; }
@@ -99,6 +100,7 @@ class Viewport {
             pivot = center;
             R = computeLookAtRotation(t, pivot);
             resetRollTarget();
+            clearTransientMotion();
         }
 
         void rotate(const glm::vec2& pos, bool enforceUpright = false) {
@@ -183,47 +185,43 @@ class Viewport {
             }
         }
 
-        void advance_forward(float deltaTime, float additional_speed = 0.0f) {
-            const glm::vec3 forward = lfs::rendering::cameraForward(R);
-            const glm::vec3 movement = forward * deltaTime * (wasdSpeed + additional_speed);
+        // WASD movement carried by an exponentially-damped velocity: holding a
+        // key eases the camera up to wasdSpeed, releasing lets it glide to rest
+        // instead of stopping dead, giving a light sense of inertia. Call every
+        // frame while hasWasdMomentum() so a released key can decay to zero.
+        void advanceWasd(float deltaTime, bool forward, bool backward, bool left,
+                         bool right, bool up, bool down, float additional_speed = 0.0f) {
+            glm::vec3 dir(0.0f);
+            if (forward != backward) {
+                const glm::vec3 f = lfs::rendering::cameraForward(R);
+                dir += forward ? f : -f;
+            }
+            if (left != right) {
+                const glm::vec3 r = glm::normalize(R * glm::vec3(1, 0, 0));
+                dir += right ? r : -r;
+            }
+            if (up != down) {
+                const glm::vec3 u = glm::normalize(R * glm::vec3(0, 1, 0));
+                dir += up ? u : -u;
+            }
+
+            const glm::vec3 target_velocity = dir * (wasdSpeed + additional_speed);
+            const float blend = 1.0f - std::exp(-deltaTime * kWasdInertiaRate);
+            wasd_velocity = glm::mix(wasd_velocity, target_velocity, blend);
+
+            const float stop_speed = kWasdStopFraction * (wasdSpeed + additional_speed);
+            if (glm::length2(dir) < 1e-8f && glm::length2(wasd_velocity) < stop_speed * stop_speed) {
+                wasd_velocity = glm::vec3(0.0f);
+                return;
+            }
+
+            const glm::vec3 movement = wasd_velocity * deltaTime;
             t += movement;
             pivot += movement;
         }
 
-        void advance_backward(float deltaTime, float additional_speed = 0.0f) {
-            const glm::vec3 forward = lfs::rendering::cameraForward(R);
-            const glm::vec3 movement = -forward * deltaTime * (wasdSpeed + additional_speed);
-            t += movement;
-            pivot += movement;
-        }
-
-        void advance_left(float deltaTime, float additional_speed = 0.0f) {
-            const glm::vec3 right = glm::normalize(R * glm::vec3(1, 0, 0));
-            const glm::vec3 movement = -right * deltaTime * (wasdSpeed + additional_speed);
-            t += movement;
-            pivot += movement;
-        }
-
-        void advance_right(float deltaTime, float additional_speed = 0.0f) {
-            const glm::vec3 right = glm::normalize(R * glm::vec3(1, 0, 0));
-            const glm::vec3 movement = right * deltaTime * (wasdSpeed + additional_speed);
-            t += movement;
-            pivot += movement;
-        }
-
-        void advance_up(float deltaTime, float additional_speed = 0.0f) {
-            const glm::vec3 up = glm::normalize(R * glm::vec3(0, 1, 0));
-            const glm::vec3 movement = up * deltaTime * (wasdSpeed + additional_speed);
-            t += movement;
-            pivot += movement;
-        }
-
-        void advance_down(float deltaTime, float additional_speed = 0.0f) {
-            const glm::vec3 up = glm::normalize(R * glm::vec3(0, 1, 0));
-            const glm::vec3 movement = -up * deltaTime * (wasdSpeed + additional_speed);
-            t += movement;
-            pivot += movement;
-        }
+        [[nodiscard]] bool hasWasdMomentum() const { return glm::length2(wasd_velocity) > 0.0f; }
+        void clearWasdMomentum() { wasd_velocity = glm::vec3(0.0f); }
 
         void initScreenPos(const glm::vec2& pos) { prePos = pos; }
 
@@ -245,44 +243,73 @@ class Viewport {
             pivot = t + forward * distance;
         }
 
-        // Simplified orbit methods - no velocity tracking
-        void startRotateAroundCenter(const glm::vec2& pos, float /*time*/) {
+        void startRotateAroundCenter(const glm::vec2& pos, float time) {
             prePos = pos;
+            orbit_last_time = time;
             isOrbiting = true;
+            clearOrbitMomentum();
         }
 
         void updateRotateAroundCenter(const glm::vec2& pos, float /*time*/) {
-            if (!isOrbiting)
-                return;
-
-            glm::vec2 delta = pos - prePos;
-            float yaw = -delta.x * rotateCenterSpeed;
-            float pitch = -delta.y * rotateCenterSpeed;
-
-            applyRotationAroundCenter(yaw, pitch);
-            prePos = pos;
+            if (isOrbiting)
+                applyOrbitDrag(pos, false);
         }
 
         void updateTrackballRotateAroundCenter(const glm::vec2& pos, float /*time*/) {
+            if (isOrbiting)
+                applyOrbitDrag(pos, true);
+        }
+
+        // Release intentionally keeps the momentum so updateOrbitCoast can ease
+        // the view to a stop rather than halting it dead.
+        void endRotateAroundCenter() { isOrbiting = false; }
+
+        // Like updateRotateAroundCenter, but also remembers the recent angular
+        // motion so the view can coast on release. The rotation still applies
+        // immediately; only the post-release coast is new.
+        void orbitDrag(const glm::vec2& pos, bool trackball, float time) {
             if (!isOrbiting)
                 return;
-
-            glm::vec2 delta = pos - prePos;
-            float yaw = -delta.x * rotateCenterSpeed;
-            float pitch = -delta.y * rotateCenterSpeed;
-
-            applyTrackballRotationAroundCenter(yaw, pitch);
-            prePos = pos;
+            const glm::vec2 rotation = applyOrbitDrag(pos, trackball);
+            const float sample_time = std::max(time - orbit_last_time, kOrbitMinSampleTime);
+            orbit_last_time = time;
+            orbit_coast_trackball = trackball;
+            orbit_vel_yaw = glm::mix(orbit_vel_yaw, rotation.x / sample_time, kOrbitVelBlend);
+            orbit_vel_pitch = glm::mix(orbit_vel_pitch, rotation.y / sample_time, kOrbitVelBlend);
         }
 
-        void endRotateAroundCenter() {
-            isOrbiting = false;
-            // No velocity to clear
+        // Fade stored motion while the button is still held, so pausing before
+        // release lets the coast die down rather than flinging on a stale drag.
+        void decayOrbitMomentum(float deltaTime) {
+            const float decay = std::exp(-deltaTime * kOrbitCoastRate);
+            orbit_vel_yaw *= decay;
+            orbit_vel_pitch *= decay;
+            snapOrbitMomentumToRest();
         }
 
-        // No-op since we removed inertia
-        void updateInertia(float /*deltaTime*/) {
-            // Inertia disabled - do nothing
+        // Coast after release by integrating remembered angular velocity while
+        // decaying it to zero.
+        void updateOrbitCoast(float deltaTime) {
+            if (!hasOrbitMomentum())
+                return;
+            const float decay = std::exp(-deltaTime * kOrbitCoastRate);
+            const float coast_time = (1.0f - decay) / kOrbitCoastRate;
+            applyOrbitRotation(
+                orbit_vel_yaw * coast_time,
+                orbit_vel_pitch * coast_time,
+                orbit_coast_trackball);
+            orbit_vel_yaw *= decay;
+            orbit_vel_pitch *= decay;
+            snapOrbitMomentumToRest();
+        }
+
+        [[nodiscard]] bool hasOrbitMomentum() const {
+            return orbit_vel_yaw != 0.0f || orbit_vel_pitch != 0.0f;
+        }
+
+        void clearOrbitMomentum() {
+            orbit_vel_yaw = 0.0f;
+            orbit_vel_pitch = 0.0f;
         }
 
         // Short eased translation toward a target position; orientation and
@@ -313,6 +340,12 @@ class Viewport {
             }
         }
 
+        void clearTransientMotion() {
+            clearWasdMomentum();
+            clearOrbitMomentum();
+            glide_time_left = 0.0f;
+        }
+
         void setAxisAlignedView(int axis, bool negative) {
             float dist_to_pivot = glm::length(pivot - t);
             if (!std::isfinite(dist_to_pivot) || dist_to_pivot < 0.1f)
@@ -322,6 +355,7 @@ class Viewport {
             const glm::vec3 forward = lfs::rendering::cameraForward(R);
             t = pivot - forward * dist_to_pivot;
             resetRollTarget();
+            clearTransientMotion();
         }
 
         [[nodiscard]] bool snapToNearestAxisView(const float max_angle_degrees,
@@ -368,6 +402,45 @@ class Viewport {
         float glide_time_left = 0.0f;
         static constexpr float kGlideDuration = 0.35f;
         static constexpr float kGlideRate = 15.0f;
+
+        glm::vec3 wasd_velocity{0.0f};
+        static constexpr float kWasdInertiaRate = 12.0f;
+        static constexpr float kWasdStopFraction = 0.02f;
+
+        float orbit_vel_yaw = 0.0f;
+        float orbit_vel_pitch = 0.0f;
+        float orbit_last_time = 0.0f;
+        bool orbit_coast_trackball = false;
+        static constexpr float kOrbitMinSampleTime = 1.0f / 240.0f;
+        static constexpr float kOrbitVelBlend = 0.35f;
+        static constexpr float kOrbitCoastRate = 18.0f;
+        static constexpr float kOrbitStopVelocity = 1e-4f;
+
+        void snapOrbitMomentumToRest() {
+            if (std::abs(orbit_vel_yaw) < kOrbitStopVelocity &&
+                std::abs(orbit_vel_pitch) < kOrbitStopVelocity) {
+                orbit_vel_yaw = 0.0f;
+                orbit_vel_pitch = 0.0f;
+            }
+        }
+
+        void applyOrbitRotation(float yaw, float pitch, bool trackball) {
+            if (trackball) {
+                applyTrackballRotationAroundCenter(yaw, pitch);
+            } else {
+                applyRotationAroundCenter(yaw, pitch);
+            }
+        }
+
+        // Maps a drag delta to an orbit rotation, applies it, and returns the
+        // applied (yaw, pitch) so callers can track angular momentum.
+        glm::vec2 applyOrbitDrag(const glm::vec2& pos, bool trackball) {
+            const glm::vec2 delta = pos - prePos;
+            const glm::vec2 rotation(-delta.x * rotateCenterSpeed, -delta.y * rotateCenterSpeed);
+            prePos = pos;
+            applyOrbitRotation(rotation.x, rotation.y, trackball);
+            return rotation;
+        }
 
         [[nodiscard]] static float wrapAngle(float angle) {
             while (angle > glm::pi<float>())
@@ -613,6 +686,7 @@ public:
         camera.R = R;
         camera.t = t;
         camera.resetRollTarget();
+        camera.clearTransientMotion();
     }
 
     glm::mat3 getRotationMatrix() const {
