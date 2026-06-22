@@ -5993,7 +5993,8 @@ namespace lfs::vis::gui {
             gizmo_manager_.updateCropFlash();
         }
 
-        float primary_toolbar_x = 0.0f;
+        const float viewport_content_offset = viewport_layout_.pos.x - screen.work_pos.x;
+        float primary_toolbar_x = viewport_content_offset;
         float primary_toolbar_width = viewport_layout_.size.x;
         bool show_secondary_toolbar = false;
         float secondary_toolbar_x = 0.0f;
@@ -6027,7 +6028,7 @@ namespace lfs::vis::gui {
         rml_viewport_overlay_.setViewportBounds(
             overlay_pos, overlay_size,
             {panel_input.screen_x, panel_input.screen_y});
-        rml_viewport_overlay_.setViewportContentOffset(viewport_layout_.pos.x - screen.work_pos.x);
+        rml_viewport_overlay_.setViewportContentOffset(viewport_content_offset);
         RmlViewportOverlay::SplitDividerOverlayState split_divider_state;
         if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
             rendering && rendering->isSplitViewActive() && !rendering->isIndependentSplitViewActive()) {

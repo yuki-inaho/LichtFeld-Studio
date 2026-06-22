@@ -65,27 +65,6 @@
             </div>
             <div class="toolbar-separator"></div>
             <div class="icon-btn"
-                 data-for="button : camera_mode_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="icon-btn"
-                 data-for="button : utility_primary_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="toolbar-separator"></div>
-            <div class="icon-btn"
                  data-for="button : utility_extra_buttons"
                  data-attr-id="button.button_id"
                  data-class-selected="button.selected"
@@ -104,6 +83,21 @@
                  data-attrif-disabled="!button.enabled"
                  data-event-click="toolbar_action(button.action, button.value)">
                 <img data-attr-src="button.icon_src" />
+            </div>
+        </div>
+
+        <div id="primary-viewport-gizmo-controls" class="viewport-gizmo-controls">
+            <div class="viewport-gizmo-control-row">
+                <div class="icon-btn"
+                     data-for="button : utility_primary_buttons"
+                     data-attr-id="button.button_id"
+                     data-class-selected="button.selected"
+                     data-attr-data-action="button.action_id"
+                     data-attr-title="button.tooltip_text"
+                     data-attrif-disabled="!button.enabled"
+                     data-event-click="toolbar_action(button.action, button.value)">
+                    <img data-attr-src="button.icon_src" />
+                </div>
             </div>
         </div>
 
@@ -237,27 +231,6 @@
             </div>
             <div class="toolbar-separator"></div>
             <div class="icon-btn"
-                 data-for="button : camera_mode_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="icon-btn"
-                 data-for="button : utility_primary_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="toolbar-separator"></div>
-            <div class="icon-btn"
                  data-for="button : utility_extra_buttons"
                  data-attr-id="button.button_id"
                  data-class-selected="button.selected"
@@ -276,6 +249,21 @@
                  data-attrif-disabled="!button.enabled"
                  data-event-click="toolbar_action(button.action, button.value)">
                 <img data-attr-src="button.icon_src" />
+            </div>
+        </div>
+
+        <div id="secondary-viewport-gizmo-controls" class="viewport-gizmo-controls">
+            <div class="viewport-gizmo-control-row">
+                <div class="icon-btn"
+                     data-for="button : utility_primary_buttons"
+                     data-attr-id="button.button_id"
+                     data-class-selected="button.selected"
+                     data-attr-data-action="button.action_id"
+                     data-attr-title="button.tooltip_text"
+                     data-attrif-disabled="!button.enabled"
+                     data-event-click="toolbar_action(button.action, button.value)">
+                    <img data-attr-src="button.icon_src" />
+                </div>
             </div>
         </div>
 

@@ -720,6 +720,8 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert "secondary-pivot-toolbar" not in rml
     assert "toolbar-context-stack" not in rml
     assert rml.count('data-for="button : gizmo_buttons"') == 2
+    assert rml.count('data-for="button : camera_mode_buttons"') == 0
+    assert rml.count('data-for="button : utility_primary_buttons"') == 2
     assert rml.count('data-for="button : submode_buttons"') == 3
     assert rml.count('data-for="button : pivot_buttons"') == 1
     assert rml.count('data-for="button : mirror_group_buttons"') == 2
@@ -730,7 +732,22 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert 'class="toolbar-flyout-divider hidden"' not in rml
     assert "toolbar-flyout" not in rml
     assert rml.count('data-for="button : selection_group_buttons"') == 2
-    assert rml.count('class="toolbar-separator"') == 8
+    assert rml.count('class="toolbar-separator"') == 6
+    assert rml.count('class="viewport-gizmo-controls"') == 2
+    assert rml.count('class="viewport-gizmo-control-row"') == 2
+    assert 'id="primary-viewport-gizmo-controls" class="viewport-gizmo-controls"' in rml
+    assert 'id="secondary-viewport-gizmo-controls" class="viewport-gizmo-controls"' in rml
+    assert "viewport-nav-toolbar" not in rml
+    assert "viewport-nav-separator" not in rml
+    primary_left = rml[
+        rml.index('id="primary-utility-toolbar"') : rml.index('id="primary-viewport-gizmo-controls"')
+    ]
+    secondary_left = rml[
+        rml.index('id="secondary-utility-toolbar"') : rml.index('id="secondary-viewport-gizmo-controls"')
+    ]
+    for toolbar_markup in (primary_left, secondary_left):
+        assert 'data-for="button : camera_mode_buttons"' not in toolbar_markup
+        assert 'data-for="button : utility_primary_buttons"' not in toolbar_markup
     assert rml.count('data-attr-data-shortcut="button.shortcut_text"') == 24
     assert "data-attr-data-tooltip" not in rml
     assert 'data-attr-title="button.tooltip_text"' in rml
@@ -851,7 +868,6 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert '<span class="flyout-corner-marker"></span>' not in rml
     assert "dropdown-arrow.png" not in rml
     assert "flyout_open" not in rml
-    assert 'data-for="button : camera_mode_buttons"' in rml
     assert 'data-for="button : render_mode_buttons"' not in rml
     assert 'data-class-selected="button.selected"' in rml
     assert "toolbar-flyout" not in rcss
@@ -870,6 +886,19 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert "width: 64dp;" in rcss
     assert "width: 24dp;" in rcss
     assert ".toolbar-vertical .icon-btn {\n    position: relative;\n    display: flex;" in rcss
+    assert ".viewport-gizmo-controls {\n    position: absolute;\n    top: 108dp;\n    right: 10dp;" in rcss
+    assert "flex-direction: column;\n    align-items: center;\n    width: 95dp;" in rcss
+    assert ".viewport-gizmo-control-row {\n    display: flex;\n    flex-direction: row;" in rcss
+    assert "justify-content: center;\n    width: 95dp;\n    gap: 3dp;" in rcss
+    assert ".viewport-gizmo-controls .icon-btn {\n    position: relative;\n    display: flex;" in rcss
+    gizmo_button_start = rcss.index(".viewport-gizmo-controls .icon-btn {")
+    gizmo_button_end = rcss.index(".viewport-gizmo-controls .icon-btn:hover")
+    gizmo_button_rcss = rcss[gizmo_button_start:gizmo_button_end]
+    assert "width: 30dp;\n    height: 30dp;\n    min-width: 30dp;\n    min-height: 30dp;" in gizmo_button_rcss
+    assert ".viewport-gizmo-controls .icon-btn img {\n    width: 20dp;\n    height: 20dp;" in rcss
+    assert "viewport-nav-toolbar" not in rcss
+    assert "viewport-nav-row" not in rcss
+    assert "viewport-nav-separator" not in rcss
     assert "width: 30dp;\n    height: 30dp;\n    min-width: 30dp;\n    min-height: 30dp;" in rcss
     assert ".toolbar-hcenter .toolbar-container {\n    align-items: center;\n    padding: 5dp 6dp;" in rcss
     assert ".toolbar-hcenter .icon-btn {\n    display: flex;" in rcss

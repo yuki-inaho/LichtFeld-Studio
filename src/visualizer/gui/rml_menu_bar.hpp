@@ -141,6 +141,7 @@ namespace lfs::vis::gui {
         std::vector<std::string> current_idnames_;
         std::vector<MenuLabelView> menu_labels_;
         std::vector<MenuDropdownRootView> dropdown_items_;
+        std::vector<MenuToolbarButtonView> camera_buttons_;
         std::vector<MenuToolbarButtonView> render_buttons_;
         std::vector<MenuToolbarButtonView> projection_buttons_;
         int active_index_ = -1;

@@ -244,6 +244,7 @@ namespace lfs::vis::gui {
         ctor.RegisterArray<std::vector<MenuToolbarButtonView>>();
         ctor.Bind("menu_labels", &menu_labels_);
         ctor.Bind("dropdown_items", &dropdown_items_);
+        ctor.Bind("menu_camera_buttons", &camera_buttons_);
         ctor.Bind("menu_render_buttons", &render_buttons_);
         ctor.Bind("menu_projection_buttons", &projection_buttons_);
         menu_model_ = ctor.GetModelHandle();
@@ -281,6 +282,7 @@ namespace lfs::vis::gui {
         menu_model_ = {};
         menu_labels_.clear();
         dropdown_items_.clear();
+        camera_buttons_.clear();
         render_buttons_.clear();
         projection_buttons_.clear();
         open_menu_idname_.clear();
@@ -390,6 +392,7 @@ namespace lfs::vis::gui {
 
         rebuildLabels();
         menu_model_.DirtyVariable("dropdown_items");
+        menu_model_.DirtyVariable("menu_camera_buttons");
         menu_model_.DirtyVariable("menu_render_buttons");
         menu_model_.DirtyVariable("menu_projection_buttons");
         updateTheme();
@@ -693,8 +696,36 @@ namespace lfs::vis::gui {
     }
 
     void RmlMenuBar::rebuildToolbarButtons() {
+        std::vector<MenuToolbarButtonView> camera_buttons;
         std::vector<MenuToolbarButtonView> render_buttons;
         std::vector<MenuToolbarButtonView> projection_buttons;
+
+        const auto make = [](std::string id, std::string action, std::string value,
+                             std::string icon, std::string tooltip_key,
+                             std::string tooltip_text, bool selected) {
+            return MenuToolbarButtonView{
+                .button_id = std::move(id),
+                .action = std::move(action),
+                .value = std::move(value),
+                .icon_src = "../icon/" + std::move(icon) + ".png",
+                .tooltip_key = std::move(tooltip_key),
+                .tooltip_text = std::move(tooltip_text),
+                .selected = selected,
+            };
+        };
+
+        if (const auto* ic = lfs::vis::InputController::instance()) {
+            const auto mode = ic->cameraNavigationMode();
+            camera_buttons.push_back(make("menu-camera-orbit", "set_camera_navigation_mode", "orbit",
+                                          "camera-orbit", "", "Orbit Camera",
+                                          mode == lfs::vis::InputController::CameraNavigationMode::Orbit));
+            camera_buttons.push_back(make("menu-camera-trackball", "set_camera_navigation_mode", "trackball",
+                                          "world", "", "Free Orbit Camera",
+                                          mode == lfs::vis::InputController::CameraNavigationMode::Trackball));
+            camera_buttons.push_back(make("menu-camera-fpv", "set_camera_navigation_mode", "fpv",
+                                          "camera-fpv", "", "Fly Camera",
+                                          mode == lfs::vis::InputController::CameraNavigationMode::FPV));
+        }
 
         if (const auto* rm = lfs::vis::services().renderingOrNull()) {
             const auto settings = rm->getSettings();
@@ -706,20 +737,6 @@ namespace lfs::vis::gui {
                 active_mode = "rings";
             else if (settings.show_center_markers)
                 active_mode = "centers";
-
-            const auto make = [](std::string id, std::string action, std::string value,
-                                 std::string icon, std::string tooltip_key,
-                                 std::string tooltip_text, bool selected) {
-                return MenuToolbarButtonView{
-                    .button_id = std::move(id),
-                    .action = std::move(action),
-                    .value = std::move(value),
-                    .icon_src = "../icon/" + std::move(icon) + ".png",
-                    .tooltip_key = std::move(tooltip_key),
-                    .tooltip_text = std::move(tooltip_text),
-                    .selected = selected,
-                };
-            };
 
             render_buttons.push_back(make("menu-render-splats", "set_render_mode", "splats", "blob",
                                           "toolbar.splat_rendering", "Splat Rendering",
@@ -754,6 +771,11 @@ namespace lfs::vis::gui {
             menu_model_.DirtyVariable("menu_render_buttons");
             render_needed_ = true;
         }
+        if (camera_buttons != camera_buttons_) {
+            camera_buttons_ = std::move(camera_buttons);
+            menu_model_.DirtyVariable("menu_camera_buttons");
+            render_needed_ = true;
+        }
         if (projection_buttons != projection_buttons_) {
             projection_buttons_ = std::move(projection_buttons);
             menu_model_.DirtyVariable("menu_projection_buttons");
@@ -777,6 +799,17 @@ namespace lfs::vis::gui {
                                point_cloud_changed && enable_point_cloud
                                    ? lfs::vis::DirtyFlag::ALL
                                    : lfs::vis::DirtyFlag::SELECTION);
+        } else if (action == "set_camera_navigation_mode") {
+            auto* ic = lfs::vis::InputController::instance();
+            if (!ic)
+                return;
+            if (value == "orbit") {
+                ic->setCameraNavigationMode(lfs::vis::InputController::CameraNavigationMode::Orbit);
+            } else if (value == "trackball") {
+                ic->setCameraNavigationMode(lfs::vis::InputController::CameraNavigationMode::Trackball);
+            } else if (value == "fpv" || value == "fly") {
+                ic->setCameraNavigationMode(lfs::vis::InputController::CameraNavigationMode::FPV);
+            }
         } else if (action == "toggle_projection") {
             if (!rm)
                 return;

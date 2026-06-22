@@ -60,6 +60,14 @@ def test_menubar_submenus_are_stacked_above_overlay_and_hit_testable():
     assert 'data-action="window_toggle_fullscreen"' not in rml
     assert 'id="menu-window-toggle-ui"' in rml
     assert 'data-action="window_toggle_ui"' in rml
+    assert rml.count('data-for="button : menu_camera_buttons"') == 1
+    assert rml.count('data-for="button : menu_render_buttons"') == 1
+    assert rml.index('data-for="button : menu_camera_buttons"') < rml.index(
+        'data-for="button : menu_render_buttons"'
+    )
+    assert rml.index('data-for="button : menu_render_buttons"') < rml.index(
+        'data-for="button : menu_projection_buttons"'
+    )
 
 
 def test_rml_tooltips_request_only_pending_animation_frames():
@@ -124,6 +132,10 @@ def test_menu_bar_uses_retained_bounds_for_submenu_hover():
     assert "setOpenSubmenu(submenuIndexForElement(hit_element))" in menu_bar_cpp
     assert "rml_context_->GetElementAtPoint" not in menu_bar_cpp
     assert 'action == "window_toggle_fullscreen"' not in menu_bar_cpp
+    assert 'ctor.Bind("menu_camera_buttons", &camera_buttons_)' in menu_bar_cpp
+    assert 'action == "set_camera_navigation_mode"' in menu_bar_cpp
+    assert "setCameraNavigationMode" in menu_bar_cpp
+    assert "std::vector<MenuToolbarButtonView> camera_buttons_" in menu_bar_header
 
 
 def test_open_menu_requests_passive_mouse_render_and_blocks_viewport_hit_testing():
@@ -142,3 +154,17 @@ def test_open_menu_requests_passive_mouse_render_and_blocks_viewport_hit_testing
         "        }"
     ) in gui_manager_cpp
     assert "if (!ui_hidden_ && rml_menu_bar_.isOpen())" not in gui_manager_cpp
+
+
+def test_viewport_overlay_toolbar_origin_tracks_viewport_content_offset():
+    gui_manager_cpp = (
+        PROJECT_ROOT
+        / "src"
+        / "visualizer"
+        / "gui"
+        / "gui_manager.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "const float viewport_content_offset = viewport_layout_.pos.x - screen.work_pos.x;" in gui_manager_cpp
+    assert "float primary_toolbar_x = viewport_content_offset;" in gui_manager_cpp
+    assert "rml_viewport_overlay_.setViewportContentOffset(viewport_content_offset);" in gui_manager_cpp
