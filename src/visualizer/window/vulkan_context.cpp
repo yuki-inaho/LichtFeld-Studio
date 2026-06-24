@@ -64,15 +64,15 @@ namespace lfs::vis {
         }
 
         [[nodiscard]] std::uint32_t addResizeHeadroom(const std::uint32_t requested,
-                                                      const std::uint32_t previous,
                                                       const std::uint32_t max_extent) {
             // Pad both axes during interactive resize so direction changes do not
-            // force another WSI rebuild a few mouse deltas later.
-            const std::uint32_t baseline = std::max(requested, previous);
-            if (baseline >= max_extent) {
+            // force another WSI rebuild a few mouse deltas later. Do not carry
+            // forward the previous swapchain extent: during shrink/restore that
+            // can repeatedly compound the headroom into a huge offscreen surface.
+            if (requested >= max_extent) {
                 return max_extent;
             }
-            return baseline + std::min(kSwapchainResizeHeadroomPx, max_extent - baseline);
+            return requested + std::min(kSwapchainResizeHeadroomPx, max_extent - requested);
         }
 
         [[nodiscard]] double elapsedMs(const std::chrono::steady_clock::time_point start) {
@@ -531,25 +531,33 @@ namespace lfs::vis {
         return swapchain_extent_fixed_to_surface_ && !swapchain_present_scaling_enabled_;
     }
 
-    void VulkanContext::deferSwapchainResizeRecreate(const bool requires_recreate) {
+    void VulkanContext::deferSwapchainResizeRecreate(
+        const bool requires_recreate,
+        const std::optional<bool> allow_headroom) {
         const auto now = std::chrono::steady_clock::now();
         framebuffer_resize_deferred_ = true;
         framebuffer_resize_requires_recreate_ = framebuffer_resize_requires_recreate_ || requires_recreate;
+        if (allow_headroom.has_value()) {
+            framebuffer_resize_allow_headroom_ = *allow_headroom;
+        }
         framebuffer_resize_last_change_ = now;
         framebuffer_resized_ = false;
         last_error_.clear();
     }
 
     bool VulkanContext::pendingSwapchainResizeReady() const {
+        const auto now = std::chrono::steady_clock::now();
         if (!framebuffer_resize_deferred_) {
-            return true;
+            if (!framebuffer_resize_exact_after_headroom_) {
+                return true;
+            }
+            return now - framebuffer_resize_last_change_ >= kSwapchainResizeQuietDelay;
         }
 
         if (!framebuffer_resize_requires_recreate_) {
             return true;
         }
 
-        const auto now = std::chrono::steady_clock::now();
         const int grow_delta = positiveResizeDelta(framebuffer_width_,
                                                    framebuffer_height_,
                                                    swapchain_extent_);
@@ -570,15 +578,24 @@ namespace lfs::vis {
     }
 
     double VulkanContext::secondsUntilPendingSwapchainResizeReady() const {
+        const auto now = std::chrono::steady_clock::now();
         if (!framebuffer_resize_deferred_) {
-            return 0.0;
+            if (!framebuffer_resize_exact_after_headroom_) {
+                return 0.0;
+            }
+            const auto since_last_change = now - framebuffer_resize_last_change_;
+            if (since_last_change >= kSwapchainResizeQuietDelay) {
+                return 0.0;
+            }
+            return std::chrono::duration<double>(
+                       kSwapchainResizeQuietDelay - since_last_change)
+                .count();
         }
 
         if (!framebuffer_resize_requires_recreate_) {
             return 0.0;
         }
 
-        const auto now = std::chrono::steady_clock::now();
         const auto since_last_change = now - framebuffer_resize_last_change_;
         const int grow_delta = positiveResizeDelta(framebuffer_width_,
                                                    framebuffer_height_,
@@ -636,21 +653,44 @@ namespace lfs::vis {
         return true;
     }
 
-    void VulkanContext::notifyFramebufferResized(const int width, const int height) {
-        if (width == framebuffer_width_ && height == framebuffer_height_) {
+    void VulkanContext::notifyFramebufferResized(const int width,
+                                                 const int height,
+                                                 const ResizeIntent intent) {
+        const bool exact_resize = intent == ResizeIntent::Exact;
+        const bool exact_extent_mismatch =
+            exact_resize &&
+            swapchain_ != VK_NULL_HANDLE &&
+            width > 0 &&
+            height > 0 &&
+            (static_cast<std::uint32_t>(width) != swapchain_extent_.width ||
+             static_cast<std::uint32_t>(height) != swapchain_extent_.height);
+        if (width == framebuffer_width_ && height == framebuffer_height_ &&
+            !exact_extent_mismatch) {
             return;
         }
         framebuffer_width_ = width;
         framebuffer_height_ = height;
+        framebuffer_resize_allow_headroom_ = !exact_resize;
         if (width <= 0 || height <= 0) {
             framebuffer_resize_deferred_ = false;
             framebuffer_resize_requires_recreate_ = false;
+            framebuffer_resize_allow_headroom_ = false;
+            framebuffer_resize_exact_after_headroom_ = false;
             framebuffer_resized_ = true;
             return;
         }
+
+        framebuffer_resize_exact_after_headroom_ = !exact_resize;
         const bool requires_recreate =
-            framebufferResizeRequiresSwapchainRecreate();
-        deferSwapchainResizeRecreate(requires_recreate);
+            framebufferResizeRequiresSwapchainRecreate() || exact_extent_mismatch;
+        if (requires_recreate) {
+            deferSwapchainResizeRecreate(requires_recreate, framebuffer_resize_allow_headroom_);
+        } else {
+            framebuffer_resize_deferred_ = false;
+            framebuffer_resize_requires_recreate_ = false;
+            framebuffer_resize_last_change_ = std::chrono::steady_clock::now();
+            last_error_.clear();
+        }
     }
 
     bool VulkanContext::presentBootstrapFrame(const float r, const float g, const float b, const float a) {
@@ -673,6 +713,20 @@ namespace lfs::vis {
         if (device_ == VK_NULL_HANDLE || framebuffer_width_ <= 0 || framebuffer_height_ <= 0) {
             last_error_.clear();
             return false;
+        }
+
+        if (framebuffer_resize_exact_after_headroom_ && !framebuffer_resize_deferred_) {
+            const bool extent_matches_framebuffer =
+                swapchain_ != VK_NULL_HANDLE &&
+                static_cast<std::uint32_t>(framebuffer_width_) == swapchain_extent_.width &&
+                static_cast<std::uint32_t>(framebuffer_height_) == swapchain_extent_.height;
+            if (extent_matches_framebuffer) {
+                framebuffer_resize_exact_after_headroom_ = false;
+            } else if (pendingSwapchainResizeReady()) {
+                framebuffer_resize_exact_after_headroom_ = false;
+                framebuffer_resize_allow_headroom_ = false;
+                framebuffer_resized_ = true;
+            }
         }
 
         if (!promoteDeferredSwapchainResizeIfSettled()) {
@@ -748,7 +802,8 @@ namespace lfs::vis {
                       framebuffer_height_,
                       swapchain_extent_.width,
                       swapchain_extent_.height);
-            deferSwapchainResizeRecreate();
+            framebuffer_resize_exact_after_headroom_ = false;
+            deferSwapchainResizeRecreate(true, false);
             return false;
         }
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -998,7 +1053,8 @@ namespace lfs::vis {
                       swapchain_extent_.width,
                       swapchain_extent_.height);
             frame_suboptimal_ = false;
-            deferSwapchainResizeRecreate();
+            framebuffer_resize_exact_after_headroom_ = false;
+            deferSwapchainResizeRecreate(true, false);
             return true;
         }
         frame_suboptimal_ = false;
@@ -2053,12 +2109,8 @@ namespace lfs::vis {
                                           ? scaling_capabilities->maxScaledImageExtent
                                           : capabilities.maxImageExtent;
         if (add_resize_headroom) {
-            extent.width = addResizeHeadroom(extent.width,
-                                             swapchain_extent_.width,
-                                             max_extent.width);
-            extent.height = addResizeHeadroom(extent.height,
-                                              swapchain_extent_.height,
-                                              max_extent.height);
+            extent.width = addResizeHeadroom(extent.width, max_extent.width);
+            extent.height = addResizeHeadroom(extent.height, max_extent.height);
         }
         extent.width = std::clamp(extent.width, min_extent.width, max_extent.width);
         extent.height = std::clamp(extent.height, min_extent.height, max_extent.height);
@@ -2912,10 +2964,12 @@ namespace lfs::vis {
         const auto present_scaling_capabilities = queryPresentScalingCapabilities(present_mode);
         const bool use_present_scaling =
             old_swapchain != VK_NULL_HANDLE && present_scaling_capabilities.has_value();
+        const bool add_resize_headroom =
+            old_swapchain != VK_NULL_HANDLE && framebuffer_resize_allow_headroom_;
         const VkExtent2D extent = chooseSwapchainExtent(support.capabilities,
                                                         framebuffer_width,
                                                         framebuffer_height,
-                                                        old_swapchain != VK_NULL_HANDLE,
+                                                        add_resize_headroom,
                                                         use_present_scaling ? &*present_scaling_capabilities : nullptr);
         if (extent.width == 0 || extent.height == 0) {
             // Surface reports zero extent (window minimized); skip creation and retry next frame.
@@ -3575,20 +3629,26 @@ namespace lfs::vis {
             LOG_TIMER_THRESHOLD("frame_pacing.vulkan_recreateSwapchain.destroy_dependent_resources", 0.25);
             destroySwapchain();
         }
-        const bool created =
+        const bool swapchain_created =
             timed("frame_pacing.vulkan_recreateSwapchain.createSwapchain",
-                  [&] { return createSwapchain(framebuffer_width_, framebuffer_height_, old_swapchain); }) &&
+                  [&] { return createSwapchain(framebuffer_width_, framebuffer_height_, old_swapchain); });
+        const bool created =
+            swapchain_created &&
             timed("frame_pacing.vulkan_recreateSwapchain.createImageViews",
                   [&] { return createImageViews(); }) &&
             timed("frame_pacing.vulkan_recreateSwapchain.createDepthStencilResources",
                   [&] { return createDepthStencilResources(); });
-        if (old_swapchain != VK_NULL_HANDLE) {
+        if (swapchain_created && old_swapchain != VK_NULL_HANDLE) {
             LOG_TIMER_THRESHOLD("frame_pacing.vulkan_recreateSwapchain.destroy_old_swapchain", 0.25);
             vkDestroySwapchainKHR(device_, old_swapchain, nullptr);
         }
         if (!created) {
             const std::string error = last_error_;
-            destroySwapchain();
+            if (swapchain_created) {
+                destroySwapchain();
+            } else {
+                swapchain_ = old_swapchain;
+            }
             framebuffer_resized_ = true;
             last_error_ = error;
             return false;

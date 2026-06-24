@@ -24,6 +24,11 @@ namespace lfs::vis {
 
     class WindowManager {
     public:
+        enum class ResizeIntent {
+            Interactive,
+            Exact,
+        };
+
         struct HitTestRect {
             int x = 0;
             int y = 0;
@@ -43,7 +48,8 @@ namespace lfs::vis {
         bool init();
 
         void showWindow();
-        void updateWindowSize(const char* reason = "manual");
+        void updateWindowSize(const char* reason = "manual",
+                              ResizeIntent intent = ResizeIntent::Exact);
         void swapBuffers();
         void pollEvents();
         void waitEvents(double timeout_seconds);

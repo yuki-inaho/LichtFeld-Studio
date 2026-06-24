@@ -396,7 +396,7 @@ namespace lfs::vis {
         }
     }
 
-    void WindowManager::updateWindowSize(const char* const reason) {
+    void WindowManager::updateWindowSize(const char* const reason, const ResizeIntent intent) {
         if (!window_) {
             return;
         }
@@ -439,7 +439,15 @@ namespace lfs::vis {
         window_size_ = next_window_size;
         framebuffer_size_ = next_framebuffer_size;
         if (vulkan_context_ && framebuffer_size_changed) {
-            vulkan_context_->notifyFramebufferResized(fbW, fbH);
+            const ResizeIntent effective_intent =
+                intent == ResizeIntent::Interactive && (is_fullscreen_ || isMaximized())
+                    ? ResizeIntent::Exact
+                    : intent;
+            const auto vulkan_resize_intent =
+                effective_intent == ResizeIntent::Interactive
+                    ? VulkanContext::ResizeIntent::Interactive
+                    : VulkanContext::ResizeIntent::Exact;
+            vulkan_context_->notifyFramebufferResized(fbW, fbH, vulkan_resize_intent);
         }
         if (size_changed) {
             lfs::core::events::ui::WindowResized{.width = fbW, .height = fbH}.emit();
@@ -560,6 +568,7 @@ namespace lfs::vis {
                 const float scale = SDL_GetWindowDisplayScale(window_);
                 lfs::core::events::internal::DisplayScaleChanged{.scale = scale}.emit();
             }
+            updateWindowSize(windowEventName(event.type), ResizeIntent::Exact);
             break;
 
         case SDL_EVENT_WINDOW_MAXIMIZED:
@@ -584,7 +593,11 @@ namespace lfs::vis {
                       event.window.data1,
                       event.window.data2,
                       is_fullscreen_);
-            updateWindowSize(windowEventName(event.type));
+            updateWindowSize(windowEventName(event.type),
+                             event.type == SDL_EVENT_WINDOW_RESTORED ||
+                                     event.type == SDL_EVENT_WINDOW_MINIMIZED
+                                 ? ResizeIntent::Exact
+                                 : ResizeIntent::Interactive);
             break;
 
         case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
@@ -595,7 +608,7 @@ namespace lfs::vis {
                       windowEventName(event.type),
                       event.window.data1,
                       event.window.data2);
-            updateWindowSize(windowEventName(event.type));
+            updateWindowSize(windowEventName(event.type), ResizeIntent::Exact);
             break;
 
         case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
@@ -606,7 +619,7 @@ namespace lfs::vis {
                       windowEventName(event.type),
                       event.window.data1,
                       event.window.data2);
-            updateWindowSize(windowEventName(event.type));
+            updateWindowSize(windowEventName(event.type), ResizeIntent::Exact);
             break;
 
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -755,7 +768,8 @@ namespace lfs::vis {
                       windowed_size_.y);
         }
 
-        updateWindowSize(fullscreen ? "setFullscreen-enter" : "setFullscreen-leave");
+        updateWindowSize(fullscreen ? "setFullscreen-enter" : "setFullscreen-leave",
+                         ResizeIntent::Exact);
         wakeEventLoop();
     }
 
@@ -895,7 +909,7 @@ namespace lfs::vis {
 
     void WindowManager::normalizeNativeMaximize(const char* const reason) {
         if (!window_ || is_fullscreen_) {
-            updateWindowSize(reason);
+            updateWindowSize(reason, ResizeIntent::Exact);
             return;
         }
 
@@ -903,14 +917,14 @@ namespace lfs::vis {
         if (isSdlMaximized()) {
             if (!SDL_RestoreWindow(window_)) {
                 LOG_WARN("Failed to restore SDL-maximized window before normalizing maximize: {}", SDL_GetError());
-                updateWindowSize(reason);
+                updateWindowSize(reason, ResizeIntent::Exact);
                 return;
             }
             restored_sdl_maximize = true;
         }
 
         if (is_borderless_maximized_) {
-            updateWindowSize(reason);
+            updateWindowSize(reason, ResizeIntent::Exact);
             return;
         }
 
@@ -948,7 +962,7 @@ namespace lfs::vis {
                 return;
             }
             is_borderless_maximized_ = false;
-            updateWindowSize(reason);
+            updateWindowSize(reason, ResizeIntent::Exact);
             wakeEventLoop();
             return;
         }
@@ -972,7 +986,7 @@ namespace lfs::vis {
         }
 
         is_borderless_maximized_ = true;
-        updateWindowSize(reason);
+        updateWindowSize(reason, ResizeIntent::Exact);
         wakeEventLoop();
     }
 
@@ -1001,7 +1015,7 @@ namespace lfs::vis {
             }
 
             is_borderless_maximized_ = false;
-            updateWindowSize(reason);
+            updateWindowSize(reason, ResizeIntent::Exact);
             wakeEventLoop();
             return;
         }
@@ -1014,7 +1028,7 @@ namespace lfs::vis {
             return;
         }
 
-        updateWindowSize(reason);
+        updateWindowSize(reason, ResizeIntent::Exact);
         wakeEventLoop();
     }
 

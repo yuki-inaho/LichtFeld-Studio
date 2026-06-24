@@ -33,6 +33,11 @@ namespace lfs::vis {
 
     class VulkanContext {
     public:
+        enum class ResizeIntent {
+            Interactive,
+            Exact,
+        };
+
         VulkanContext() = default;
         ~VulkanContext();
 
@@ -41,8 +46,10 @@ namespace lfs::vis {
 
         bool init(SDL_Window* window, int framebuffer_width, int framebuffer_height);
         void shutdown();
-        void notifyFramebufferResized(int width, int height);
-        [[nodiscard]] bool hasPendingSwapchainResize() const { return framebuffer_resize_deferred_; }
+        void notifyFramebufferResized(int width, int height, ResizeIntent intent = ResizeIntent::Exact);
+        [[nodiscard]] bool hasPendingSwapchainResize() const {
+            return framebuffer_resize_deferred_ || framebuffer_resize_exact_after_headroom_;
+        }
         [[nodiscard]] bool pendingSwapchainResizeReady() const;
         [[nodiscard]] double secondsUntilPendingSwapchainResizeReady() const;
 
@@ -252,7 +259,8 @@ namespace lfs::vis {
         bool createPipelineCache();
         bool recreateSwapchain();
         bool finishActiveRendering(VkCommandBuffer command_buffer);
-        void deferSwapchainResizeRecreate(bool requires_recreate = true);
+        void deferSwapchainResizeRecreate(bool requires_recreate = true,
+                                          std::optional<bool> allow_headroom = std::nullopt);
         [[nodiscard]] bool promoteDeferredSwapchainResizeIfSettled();
         [[nodiscard]] bool framebufferFitsSwapchainExtent() const;
         [[nodiscard]] bool framebufferResizeRequiresSwapchainRecreate() const;
@@ -359,6 +367,8 @@ namespace lfs::vis {
         bool framebuffer_resized_ = false;
         bool framebuffer_resize_deferred_ = false;
         bool framebuffer_resize_requires_recreate_ = false;
+        bool framebuffer_resize_allow_headroom_ = false;
+        bool framebuffer_resize_exact_after_headroom_ = false;
         bool swapchain_extent_fixed_to_surface_ = false;
         std::chrono::steady_clock::time_point framebuffer_resize_last_change_{};
         std::chrono::steady_clock::time_point framebuffer_resize_last_recreate_{};
