@@ -63,11 +63,11 @@
 #include "tools/selection_tool.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
-#include "window/window_manager.hpp"
 #include "visualizer/app_store.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer_impl.hpp"
 #include "window/vulkan_context.hpp"
+#include "window/window_manager.hpp"
 #include <OpenImageIO/imageio.h>
 #include <SDL3/SDL.h>
 #include <algorithm>
