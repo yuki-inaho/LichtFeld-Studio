@@ -4169,7 +4169,14 @@ namespace lfs::vis {
             scene_.setCombinedModelAllocator(std::move(allocator));
         }
         const size_t count = data->size();
-        const core::NodeId pasted_id = scene_.addSplat(name, std::move(data));
+        core::NodeId pasted_id = core::NULL_NODE;
+        {
+            core::Scene::Transaction txn(scene_);
+            // The copied Gaussian indices refer to the pre-paste topology.
+            // Paste selects the new node below.
+            scene_.clearSelection();
+            pasted_id = scene_.addSplat(name, std::move(data));
+        }
         if (pasted_id == core::NULL_NODE) {
             LOG_WARN("Failed to paste Gaussians as '{}'", name);
             return {};
@@ -4718,6 +4725,10 @@ namespace lfs::vis {
     }
 
     void SceneManager::pasteSelectionFromClipboard() {
+        if (auto* rm = services().renderingOrNull()) {
+            rm->clearSelectionPreviews();
+        }
+
         const auto pasted = hasGaussianClipboard() ? pasteGaussians() : pasteNodes();
         if (pasted.empty())
             return;

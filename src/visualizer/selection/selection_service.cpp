@@ -8,6 +8,7 @@
 #include "core/services.hpp"
 #include "core/splat_data.hpp"
 #include "core/tensor/internal/cuda_event_pool.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "gui/gui_manager.hpp"
 #include "internal/viewport.hpp"
 #include "operation/undo_entry.hpp"
@@ -1790,6 +1791,17 @@ namespace lfs::vis {
         }();
         if (!selection_mask.is_valid()) {
             return {false, 0, "Invalid selection mask"};
+        }
+
+        const cudaStream_t selection_stream =
+            (selection_mask.device() == core::Device::CUDA) ? selection_mask.stream() : nullptr;
+        if (selection_stream != nullptr) {
+            LOG_TIMER("commitSelection.wait_selection_stream");
+            try {
+                core::waitForCUDAStream(core::getCurrentCUDAStream(), selection_stream);
+            } catch (const std::exception& e) {
+                return {false, 0, e.what()};
+            }
         }
 
         {

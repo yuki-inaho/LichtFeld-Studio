@@ -782,7 +782,7 @@ namespace lfs::vis {
         };
 
         [[nodiscard]] bool hasOverlayTensor(const Tensor* const tensor, const std::size_t num_splats) {
-            return tensor && tensor->is_valid() && tensor->numel() >= num_splats && num_splats > 0;
+            return tensor && tensor->is_valid() && tensor->numel() == num_splats && num_splats > 0;
         }
 
         [[nodiscard]] bool hasOverlayTensor(const std::shared_ptr<Tensor>& tensor, const std::size_t num_splats) {
@@ -793,9 +793,9 @@ namespace lfs::vis {
             Tensor tensor,
             const std::size_t num_splats,
             const std::string_view label) {
-            if (!tensor.is_valid() || tensor.numel() < num_splats) {
+            if (!tensor.is_valid() || tensor.numel() != num_splats || num_splats == 0) {
                 return std::unexpected(std::format(
-                    "VkSplat selection overlay expected {} mask with at least {} entries",
+                    "VkSplat selection overlay expected {} mask with exactly {} entries",
                     label,
                     num_splats));
             }
