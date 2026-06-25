@@ -247,12 +247,12 @@ namespace lfs::vis {
         // Clipboard - node-level copy/paste
         bool copySelectedNodes();
         std::vector<std::string> pasteNodes();
-        [[nodiscard]] bool hasClipboard() const { return !clipboard_.empty(); }
+        [[nodiscard]] bool hasClipboard() const;
 
         // Gaussian-level copy/paste (for selection tools)
         bool copySelectedGaussians();
         std::vector<std::string> pasteGaussians();
-        [[nodiscard]] bool hasGaussianClipboard() const { return gaussian_clipboard_ != nullptr; }
+        [[nodiscard]] bool hasGaussianClipboard() const;
 
         /// Mirror selected gaussians along specified axis
         bool executeMirror(lfs::core::MirrorAxis axis);
@@ -378,6 +378,12 @@ namespace lfs::vis {
         };
         std::vector<ClipboardEntry> clipboard_;
         int clipboard_counter_ = 0;
+        enum class ClipboardKind {
+            None,
+            Nodes,
+            Gaussians,
+        };
+        ClipboardKind clipboard_kind_ = ClipboardKind::None;
 
         // Gaussian-level clipboard (selected Gaussians only)
         std::unique_ptr<lfs::core::SplatData> gaussian_clipboard_;

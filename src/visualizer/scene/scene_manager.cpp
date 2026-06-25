@@ -82,6 +82,22 @@ namespace lfs::vis {
             return name;
         }
 
+        [[nodiscard]] std::unique_ptr<lfs::core::SplatData> cloneSplatDataToCpu(
+            const lfs::core::SplatData& src) {
+            auto result = std::make_unique<lfs::core::SplatData>(
+                src.get_max_sh_degree(),
+                src.means_raw().cpu(),
+                src.sh0_raw().cpu(),
+                src.shN_raw().is_valid() ? src.shN_raw().cpu() : lfs::core::Tensor{},
+                src.scaling_raw().cpu(),
+                src.rotation_raw().cpu(),
+                src.opacity_raw().cpu(),
+                src.get_scene_scale(),
+                lfs::core::SplatData::ShNLayout::Swizzled);
+            result->set_active_sh_degree(src.get_active_sh_degree());
+            return result;
+        }
+
         void pushSceneGraphHistoryEntry(SceneManager& scene_manager,
                                         std::string label,
                                         op::SceneGraphStateSnapshot before,
@@ -4032,18 +4048,26 @@ namespace lfs::vis {
         }
     }
 
-    bool SceneManager::copySelectedNodes() {
-        static constexpr glm::mat4 IDENTITY{1.0f};
+    bool SceneManager::hasClipboard() const {
+        return clipboard_kind_ == ClipboardKind::Nodes && !clipboard_.empty();
+    }
 
+    bool SceneManager::hasGaussianClipboard() const {
+        return clipboard_kind_ == ClipboardKind::Gaussians && gaussian_clipboard_ != nullptr;
+    }
+
+    bool SceneManager::copySelectedNodes() {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        gaussian_clipboard_.reset();
+        clipboard_.clear();
+        clipboard_kind_ = ClipboardKind::None;
+
         std::shared_lock slock(selection_.mutex());
         const auto& sel_ids = selection_.selectedNodeIds();
         if (sel_ids.empty()) {
-            clipboard_.clear();
             return false;
         }
 
-        clipboard_.clear();
         clipboard_.reserve(sel_ids.size());
 
         for (const auto id : sel_ids) {
@@ -4073,16 +4097,7 @@ namespace lfs::vis {
                 cloned->texture_images = sm.texture_images;
                 entry.mesh = std::move(cloned);
             } else if (node->model && node->model->size() > 0) {
-                const auto& src = *node->model;
-                auto cloned = std::make_unique<lfs::core::SplatData>(
-                    src.get_max_sh_degree(),
-                    src.means_raw().cpu(), src.sh0_raw().cpu(),
-                    src.shN_raw().is_valid() ? src.shN_raw().clone() : lfs::core::Tensor{},
-                    src.scaling_raw().cpu(), src.rotation_raw().cpu(), src.opacity_raw().cpu(),
-                    src.get_scene_scale(),
-                    lfs::core::SplatData::ShNLayout::Swizzled);
-                cloned->set_active_sh_degree(src.get_active_sh_degree());
-                entry.data = std::move(cloned);
+                entry.data = cloneSplatDataToCpu(*node->model);
             } else {
                 continue;
             }
@@ -4090,75 +4105,117 @@ namespace lfs::vis {
             clipboard_.push_back(std::move(entry));
         }
 
+        if (clipboard_.empty())
+            return false;
+
+        clipboard_kind_ = ClipboardKind::Nodes;
         LOG_INFO("Copied {} nodes to clipboard", clipboard_.size());
-        return !clipboard_.empty();
+        return true;
     }
 
     bool SceneManager::copySelectedGaussians() {
+        clipboard_.clear();
         gaussian_clipboard_.reset();
+        clipboard_kind_ = ClipboardKind::None;
 
         if (!scene_.hasSelection())
             return false;
 
-        const auto* combined = scene_.getCombinedModel();
-        if (!combined || combined->size() == 0)
+        const auto selection = scene_.getSelectionMask();
+        if (!selection || !selection->is_valid() || selection->numel() == 0)
             return false;
 
-        const auto mask = scene_.getVisibleSelectionMask();
-        if (!mask || !mask->is_valid())
+        if (selection->count_nonzero() == 0)
             return false;
 
-        // Extract selected indices from mask
-        const auto mask_cpu = mask->cpu();
-        const auto* mask_ptr = mask_cpu.ptr<uint8_t>();
-        const size_t n = mask_cpu.size(0);
+        const auto selected_mask = selection->to(lfs::core::DataType::Bool);
 
-        std::vector<int> indices_vec;
-        indices_vec.reserve(n / 10);
-        for (size_t i = 0; i < n; ++i) {
-            if (mask_ptr[i] > 0) {
-                indices_vec.push_back(static_cast<int>(i));
+        std::vector<std::unique_ptr<lfs::core::SplatData>> owned_chunks;
+        std::vector<std::pair<const lfs::core::SplatData*, glm::mat4>> chunks_with_transforms;
+
+        const auto add_selected_chunk = [&](const lfs::core::SplatData& src,
+                                            lfs::core::Tensor mask,
+                                            const glm::mat4& world_transform) {
+            if (mask.numel() != static_cast<size_t>(src.size()) || mask.count_nonzero() == 0)
+                return;
+
+            mask = mask.to(src.means_raw().device());
+            auto extracted = std::make_unique<lfs::core::SplatData>(
+                lfs::core::extract_by_mask(src, mask));
+            if (extracted->size() == 0)
+                return;
+
+            chunks_with_transforms.emplace_back(extracted.get(), world_transform);
+            owned_chunks.push_back(std::move(extracted));
+        };
+
+        if (scene_.isConsolidated()) {
+            const auto* combined = scene_.getCombinedModel();
+            const auto transform_indices = scene_.getTransformIndices();
+            const auto transforms = scene_.getVisibleNodeTransforms();
+            if (!combined || !transform_indices || !transform_indices->is_valid() ||
+                static_cast<size_t>(combined->size()) != selected_mask.numel() ||
+                transform_indices->numel() != selected_mask.numel()) {
+                return false;
             }
+
+            for (size_t slot = 0; slot < transforms.size(); ++slot) {
+                auto slot_mask = selected_mask.logical_and(transform_indices->eq(static_cast<int>(slot)));
+                add_selected_chunk(*combined, std::move(slot_mask), transforms[slot]);
+            }
+        } else {
+            const size_t full_total = scene_.getSelectionGaussianCount();
+            if (selected_mask.numel() != full_total)
+                return false;
+
+            size_t offset = 0;
+            for (const auto* node : scene_.getNodes()) {
+                if (!node || node->type != core::NodeType::SPLAT)
+                    continue;
+
+                const size_t node_size = node->gaussian_count.load(std::memory_order_acquire);
+                const size_t node_end = offset + node_size;
+                if (node_end > selected_mask.numel())
+                    return false;
+
+                if (node->model && scene_.isNodeEffectivelyVisible(node->id)) {
+                    const size_t model_size = static_cast<size_t>(node->model->size());
+                    if (model_size == node_size) {
+                        add_selected_chunk(
+                            *node->model,
+                            selected_mask.slice(0, offset, node_end),
+                            scene_.getWorldTransform(node->id));
+                    } else {
+                        LOG_WARN("Skipping Gaussian clipboard copy for '{}': node has {} selection slots but {} model rows",
+                                 node->name,
+                                 node_size,
+                                 model_size);
+                    }
+                }
+
+                offset = node_end;
+            }
+
+            if (offset != full_total)
+                return false;
         }
 
-        if (indices_vec.empty())
+        if (chunks_with_transforms.empty())
             return false;
 
-        const auto indices = lfs::core::Tensor::from_vector(
-            indices_vec, {indices_vec.size()}, lfs::core::Device::CUDA);
+        auto merged = lfs::core::Scene::mergeSplatsWithTransforms(chunks_with_transforms);
+        if (!merged || merged->size() == 0)
+            return false;
 
-        const auto& src = *combined;
-        lfs::core::Tensor shN_selected;
-        const size_t layout_rest = src.max_sh_coeffs_rest();
-        if (src.shN_raw().is_valid() && src.shN_raw().numel() > 0 && layout_rest > 0) {
-            shN_selected = lfs::core::Tensor::empty(
-                {indices_vec.size(), layout_rest, 3}, src.shN_raw().device());
-            lfs::core::shN_swizzled_gather_to_linear(
-                src.shN_raw().ptr<float>(),
-                indices.ptr<int>(),
-                shN_selected.ptr<float>(),
-                indices_vec.size(),
-                static_cast<uint32_t>(layout_rest),
-                static_cast<uint32_t>(layout_rest));
-        }
+        gaussian_clipboard_ = cloneSplatDataToCpu(*merged);
+        clipboard_kind_ = ClipboardKind::Gaussians;
 
-        gaussian_clipboard_ = std::make_unique<lfs::core::SplatData>(
-            src.get_max_sh_degree(),
-            src.means_raw().index_select(0, indices).contiguous().cpu(),
-            src.sh0_raw().index_select(0, indices).contiguous().cpu(),
-            shN_selected.is_valid() ? shN_selected.cpu() : lfs::core::Tensor{},
-            src.scaling_raw().index_select(0, indices).contiguous().cpu(),
-            src.rotation_raw().index_select(0, indices).contiguous().cpu(),
-            src.opacity_raw().index_select(0, indices).contiguous().cpu(),
-            src.get_scene_scale());
-        gaussian_clipboard_->set_active_sh_degree(src.get_active_sh_degree());
-
-        LOG_INFO("Copied {} Gaussians", indices_vec.size());
+        LOG_INFO("Copied {} Gaussians", gaussian_clipboard_->size());
         return true;
     }
 
     std::vector<std::string> SceneManager::pasteGaussians() {
-        if (!gaussian_clipboard_ || gaussian_clipboard_->size() == 0)
+        if (!hasGaussianClipboard() || gaussian_clipboard_->size() == 0)
             return {};
 
         const auto& src = *gaussian_clipboard_;
@@ -4268,7 +4325,7 @@ namespace lfs::vis {
 
     std::vector<std::string> SceneManager::pasteNodes() {
         std::vector<std::string> pasted_names;
-        if (clipboard_.empty()) {
+        if (!hasClipboard()) {
             return pasted_names;
         }
 
@@ -4742,7 +4799,17 @@ namespace lfs::vis {
             rm->clearSelectionPreviews();
         }
 
-        const auto pasted = hasGaussianClipboard() ? pasteGaussians() : pasteNodes();
+        std::vector<std::string> pasted;
+        switch (clipboard_kind_) {
+        case ClipboardKind::Gaussians:
+            pasted = pasteGaussians();
+            break;
+        case ClipboardKind::Nodes:
+            pasted = pasteNodes();
+            break;
+        case ClipboardKind::None:
+            break;
+        }
         if (pasted.empty())
             return;
 
