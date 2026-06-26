@@ -259,29 +259,29 @@ namespace lfs::vis {
     void TrainerManager::clearTrainer() {
         LOG_DEBUG("Clearing trainer");
 
-        // Stop any ongoing training first
         const auto state = getState();
         if (state == TrainingState::Running || state == TrainingState::Paused) {
             LOG_INFO("Stopping active training before clearing");
-            // If paused, resume first so thread can process stop request
             if (state == TrainingState::Paused && trainer_) {
                 trainer_->request_resume();
             }
             stopTraining();
-            waitForCompletion();
-        } else if (state == TrainingState::Stopping) {
-            // Already stopping, just wait for completion
-            LOG_INFO("Waiting for training to finish stopping");
+        }
+
+        if (training_thread_ && training_thread_->joinable()) {
+            if (training_thread_->get_id() == std::this_thread::get_id()) {
+                LOG_ERROR("Cannot clear trainer from its own training thread");
+                return;
+            }
+            LOG_INFO("Waiting for training thread before clearing trainer");
             waitForCompletion();
         }
 
-        // Destroy trainer - destructor handles cleanup
         {
             std::lock_guard<std::mutex> lock(trainer_lifetime_mutex_);
             trainer_.reset();
         }
 
-        // Transition to Idle
         updateResourceTracking();
 
         if (getState() != TrainingState::Idle && !state_machine_.transitionTo(TrainingState::Idle)) {

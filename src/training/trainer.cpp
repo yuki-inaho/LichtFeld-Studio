@@ -2770,6 +2770,7 @@ namespace lfs::training {
 
         if (callback_stream_) {
             cudaStreamSynchronize(callback_stream_);
+            lfs::core::CudaMemoryPool::instance().release_stream(callback_stream_);
             cudaStreamDestroy(callback_stream_);
             callback_stream_ = nullptr;
         }
