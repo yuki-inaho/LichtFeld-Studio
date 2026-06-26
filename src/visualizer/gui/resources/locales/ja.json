@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "選択: なげなわ",
     "action.select_mode_rings": "選択: リング",
     "action.select_mode_color": "選択: 色",
+    "action.select_mode_box": "選択: ボックス",
+    "action.select_mode_sphere": "選択: 球",
     "action.apply_crop_box": "クロップボックスを適用",
     "action.node_pick": "ノードを選択",
     "action.node_rect_select": "ノードを矩形選択",

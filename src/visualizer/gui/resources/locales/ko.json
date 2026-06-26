@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "선택: 올가미",
     "action.select_mode_rings": "선택: 링",
     "action.select_mode_color": "선택: 색상",
+    "action.select_mode_box": "선택: 박스",
+    "action.select_mode_sphere": "선택: 구",
     "action.apply_crop_box": "자르기 상자 적용",
     "action.node_pick": "노드 선택",
     "action.node_rect_select": "노드 사각형 선택",

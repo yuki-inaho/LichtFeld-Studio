@@ -1049,6 +1049,8 @@
     "action.select_mode_lasso": "选择：套索",
     "action.select_mode_rings": "选择：环",
     "action.select_mode_color": "选择：颜色",
+    "action.select_mode_box": "选择：框",
+    "action.select_mode_sphere": "选择：球",
     "action.apply_crop_box": "应用裁剪框",
     "action.node_pick": "选取节点",
     "action.node_rect_select": "矩形选择节点",

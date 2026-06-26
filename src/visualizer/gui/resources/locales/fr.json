@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "Sélection : Lasso",
     "action.select_mode_rings": "Sélection : Anneaux",
     "action.select_mode_color": "Sélection : Couleur",
+    "action.select_mode_box": "Sélection : Boîte",
+    "action.select_mode_sphere": "Sélection : Sphère",
     "action.apply_crop_box": "Appliquer la boîte de recadrage",
     "action.node_pick": "Sélectionner le nœud",
     "action.node_rect_select": "Sélection rectangulaire de nœuds",

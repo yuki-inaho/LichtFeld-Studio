@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "Zaznaczenie: Lasso",
     "action.select_mode_rings": "Zaznaczenie: Pierścienie",
     "action.select_mode_color": "Zaznaczenie: Kolor",
+    "action.select_mode_box": "Zaznaczenie: Ramka",
+    "action.select_mode_sphere": "Zaznaczenie: Kula",
     "action.apply_crop_box": "Zastosuj pudełko przycinania",
     "action.node_pick": "Wybierz węzeł",
     "action.node_rect_select": "Prostokątne zaznaczenie węzłów",

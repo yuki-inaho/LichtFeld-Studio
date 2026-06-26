@@ -194,6 +194,8 @@
     "action.select_mode_lasso": "Selección: Lazo",
     "action.select_mode_rings": "Selección: Anillos",
     "action.select_mode_color": "Selección: Color",
+    "action.select_mode_box": "Selección: Caja",
+    "action.select_mode_sphere": "Selección: Esfera",
     "action.apply_crop_box": "Aplicar caja de recorte",
     "action.node_pick": "Seleccionar nodo",
     "action.node_rect_select": "Selección rectangular de nodos",

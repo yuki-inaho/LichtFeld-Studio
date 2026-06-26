@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "Auswahl: Lasso",
     "action.select_mode_rings": "Auswahl: Ringe",
     "action.select_mode_color": "Auswahl: Farbe",
+    "action.select_mode_box": "Auswahl: Box",
+    "action.select_mode_sphere": "Auswahl: Kugel",
     "action.apply_crop_box": "Zuschneidebox anwenden",
     "action.node_pick": "Knoten auswählen",
     "action.node_rect_select": "Knoten mit Rechteck auswählen",

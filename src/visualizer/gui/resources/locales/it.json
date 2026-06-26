@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "Selezione: Lazo",
     "action.select_mode_rings": "Selezione: Anelli",
     "action.select_mode_color": "Selezione: Colore",
+    "action.select_mode_box": "Selezione: Riquadro",
+    "action.select_mode_sphere": "Selezione: Sfera",
     "action.apply_crop_box": "Applica box di ritaglio",
     "action.node_pick": "Seleziona nodo",
     "action.node_rect_select": "Selezione rettangolare di nodi",

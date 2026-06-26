@@ -1244,6 +1244,8 @@
     "action.select_mode_lasso": "Selection: Lasso",
     "action.select_mode_rings": "Selection: Rings",
     "action.select_mode_color": "Selection: Color",
+    "action.select_mode_box": "Selection: Box",
+    "action.select_mode_sphere": "Selection: Sphere",
     "action.apply_crop_box": "Apply Crop Box",
     "action.node_pick": "Pick Node",
     "action.node_rect_select": "Rectangle Select Nodes",

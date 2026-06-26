@@ -1219,6 +1219,8 @@
     "action.select_mode_lasso": "Selectie: Lasso",
     "action.select_mode_rings": "Selectie: Ringen",
     "action.select_mode_color": "Selectie: Kleur",
+    "action.select_mode_box": "Selectie: Box",
+    "action.select_mode_sphere": "Selectie: Bol",
     "action.apply_crop_box": "Bijsnijdvak toepassen",
     "action.node_pick": "Knoop kiezen",
     "action.node_rect_select": "Knopen rechthoekig selecteren",
