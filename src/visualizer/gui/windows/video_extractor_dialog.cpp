@@ -11,6 +11,7 @@
 #include "gui/rmlui/rml_panel_host.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/ui_context.hpp"
+#include "gui/utils/native_file_dialog.hpp"
 
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Element.h>
@@ -303,7 +304,8 @@ namespace lfs::gui {
     }
 
     float VideoExtractorDialog::getDirectDrawHeight() const {
-        return host_ ? host_->getContentHeight() : 0.0f;
+        // Use the registered floating-panel height; the document resizes inside it.
+        return 0.0f;
     }
 
     void VideoExtractorDialog::setInputClipY(const float y_min, const float y_max) {
@@ -506,7 +508,7 @@ namespace lfs::gui {
         if (!host_) {
             host_ = std::make_unique<lfs::vis::gui::RmlPanelHost>(
                 manager, "video_extractor", "rmlui/video_extractor.rml");
-            host_->setHeightMode(lfs::vis::gui::PanelHeightMode::Content);
+            host_->setHeightMode(lfs::vis::gui::PanelHeightMode::Fill);
         }
 
         if (!host_->ensureDocumentLoaded())
@@ -553,14 +555,6 @@ namespace lfs::gui {
         output_value_el_ = nullptr;
         browse_video_el_ = nullptr;
         browse_output_el_ = nullptr;
-        video_path_row_el_ = nullptr;
-        video_path_input_el_ = nullptr;
-        video_path_open_el_ = nullptr;
-        video_path_cancel_el_ = nullptr;
-        output_path_row_el_ = nullptr;
-        output_path_input_el_ = nullptr;
-        output_path_choose_el_ = nullptr;
-        output_path_cancel_el_ = nullptr;
         mode_select_el_ = nullptr;
         fps_row_el_ = nullptr;
         fps_slider_el_ = nullptr;
@@ -626,14 +620,6 @@ namespace lfs::gui {
         output_value_el_ = document_->GetElementById("output-value");
         browse_video_el_ = document_->GetElementById("btn-browse-video");
         browse_output_el_ = document_->GetElementById("btn-browse-output");
-        video_path_row_el_ = document_->GetElementById("video-path-row");
-        video_path_input_el_ = document_->GetElementById("video-path-input");
-        video_path_open_el_ = document_->GetElementById("btn-video-path-open");
-        video_path_cancel_el_ = document_->GetElementById("btn-video-path-cancel");
-        output_path_row_el_ = document_->GetElementById("output-path-row");
-        output_path_input_el_ = document_->GetElementById("output-path-input");
-        output_path_choose_el_ = document_->GetElementById("btn-output-path-choose");
-        output_path_cancel_el_ = document_->GetElementById("btn-output-path-cancel");
         mode_select_el_ = dynamic_cast<Rml::ElementFormControlSelect*>(document_->GetElementById("mode-select"));
         fps_row_el_ = document_->GetElementById("fps-row");
         fps_slider_el_ = document_->GetElementById("fps-slider");
@@ -675,10 +661,7 @@ namespace lfs::gui {
             timeline_end_el_ && timeline_markers_el_ && trim_start_input_el_ &&
             trim_end_input_el_ && trim_start_set_el_ && trim_end_set_el_ && trim_reset_el_ &&
             estimated_frames_el_ && video_value_el_ && output_value_el_ && browse_video_el_ &&
-            browse_output_el_ && video_path_row_el_ && video_path_input_el_ &&
-            video_path_open_el_ && video_path_cancel_el_ && output_path_row_el_ &&
-            output_path_input_el_ && output_path_choose_el_ && output_path_cancel_el_ &&
-            mode_select_el_ && fps_row_el_ && fps_slider_el_ &&
+            browse_output_el_ && mode_select_el_ && fps_row_el_ && fps_slider_el_ &&
             fps_value_el_ && interval_row_el_ && interval_slider_el_ && interval_value_el_ &&
             format_select_el_ && quality_row_el_ && quality_slider_el_ && quality_value_el_ &&
             resolution_select_el_ && scale_row_el_ && scale_select_el_ &&
@@ -719,10 +702,6 @@ namespace lfs::gui {
         listen_click(trim_reset_el_);
         listen_click(browse_video_el_);
         listen_click(browse_output_el_);
-        listen_click(video_path_open_el_);
-        listen_click(video_path_cancel_el_);
-        listen_click(output_path_choose_el_);
-        listen_click(output_path_cancel_el_);
         listen_click(start_btn_el_);
         listen_click(cancel_btn_el_);
         listen_click(ok_btn_el_);
@@ -738,8 +717,6 @@ namespace lfs::gui {
         listen_change(custom_width_input_el_);
         listen_change(custom_height_input_el_);
         listen_change(pattern_input_el_);
-        listen_change(video_path_input_el_);
-        listen_change(output_path_input_el_);
         listen_change(trim_start_input_el_);
         listen_change(trim_end_input_el_);
 
@@ -792,6 +769,16 @@ namespace lfs::gui {
                 texture_needs_update_ = true;
             if (texture_needs_update_)
                 updatePreviewTexture();
+        }
+
+        const auto shell_region = preview_shell_el_->GetBox().GetSize(Rml::BoxArea::Content);
+        if (shell_region.x > 8.0f) {
+            const float preview_h = std::clamp(shell_region.x * 9.0f / 16.0f,
+                                               150.0f,
+                                               360.0f);
+            const std::string preview_h_css = std::format("{:.1f}px", preview_h);
+            changed |= setCachedProperty(preview_shell_el_, "height", preview_h_css);
+            changed |= setCachedProperty(preview_shell_el_, "min-height", preview_h_css);
         }
 
         const bool has_preview = player_->isOpen() && preview_texture_ && preview_texture_->valid() &&
@@ -948,10 +935,6 @@ namespace lfs::gui {
                                                : lfs::core::path_to_utf8(output_dir_);
         changed |= setCachedText(video_value_el_, video_display);
         changed |= setCachedText(output_value_el_, output_display);
-        changed |= setCachedProperty(video_path_row_el_, "display",
-                                     video_path_editor_visible_ ? "flex" : "none");
-        changed |= setCachedProperty(output_path_row_el_, "display",
-                                     output_path_editor_visible_ ? "flex" : "none");
         changed |= setCachedProperty(select_hint_el_, "display", can_start ? "none" : "inline-block");
         changed |= setCachedText(select_hint_el_, LOC(VideoExtractor::SELECT_BOTH));
 
@@ -1062,17 +1045,17 @@ namespace lfs::gui {
         if (id == "close-btn" || id == "btn-cancel") {
             disablePanel();
         } else if (id == "btn-browse-video") {
-            showPathEditor(true, !video_path_editor_visible_);
+            const auto path = lfs::vis::gui::OpenVideoFileDialog(video_path_);
+            if (!path.empty())
+                (void)openVideo(path);
         } else if (id == "btn-browse-output") {
-            showPathEditor(false, !output_path_editor_visible_);
-        } else if (id == "btn-video-path-open") {
-            applyVideoPathInput();
-        } else if (id == "btn-video-path-cancel") {
-            showPathEditor(true, false);
-        } else if (id == "btn-output-path-choose") {
-            applyOutputPathInput();
-        } else if (id == "btn-output-path-cancel") {
-            showPathEditor(false, false);
+            const auto path = lfs::vis::gui::PickFolderDialog(output_dir_);
+            if (!path.empty()) {
+                output_dir_ = path;
+                clearExtractionStatus();
+                controls_dirty_ = true;
+                markContentDirty();
+            }
         } else if (id == "btn-step-back" && player_->isOpen()) {
             player_->stepBackward();
             texture_needs_update_ = true;
@@ -1109,49 +1092,6 @@ namespace lfs::gui {
         } else if (id == "btn-error-dismiss") {
             clearErrorMessage();
         }
-    }
-
-    void VideoExtractorDialog::showPathEditor(const bool video, const bool visible) {
-        bool& state = video ? video_path_editor_visible_ : output_path_editor_visible_;
-        state = visible;
-
-        Rml::Element* const input = video ? video_path_input_el_ : output_path_input_el_;
-        if (visible && input) {
-            const std::filesystem::path& current_path = video ? video_path_ : output_dir_;
-            const bool changed =
-                setCachedControlValue(input,
-                                      current_path.empty() ? std::string{} : lfs::core::path_to_utf8(current_path));
-            controls_dirty_ |= changed;
-        }
-
-        controls_dirty_ = true;
-        markContentDirty();
-    }
-
-    void VideoExtractorDialog::applyVideoPathInput() {
-        if (!video_path_input_el_)
-            return;
-
-        const std::string value = controlValue(video_path_input_el_);
-        if (value.empty())
-            return;
-
-        if (openVideo(lfs::core::utf8_to_path(value)))
-            showPathEditor(true, false);
-    }
-
-    void VideoExtractorDialog::applyOutputPathInput() {
-        if (!output_path_input_el_)
-            return;
-
-        const std::string value = controlValue(output_path_input_el_);
-        if (value.empty())
-            return;
-
-        output_dir_ = lfs::core::utf8_to_path(value);
-        showPathEditor(false, false);
-        controls_dirty_ = true;
-        markContentDirty();
     }
 
     void VideoExtractorDialog::handleChange(const std::string& id) {

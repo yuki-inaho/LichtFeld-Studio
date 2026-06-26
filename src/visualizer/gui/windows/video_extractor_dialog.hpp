@@ -130,9 +130,6 @@ namespace lfs::gui {
         void seekFromTimeline(float mouse_x);
         void setTrimFromTimeline(TimelineDragTarget target, float mouse_x);
         void applyTextInput(const std::string& id);
-        void showPathEditor(bool video, bool visible);
-        void applyVideoPathInput();
-        void applyOutputPathInput();
         void beginExtractionFromUi();
         void markContentDirty();
         void disablePanel();
@@ -185,8 +182,6 @@ namespace lfs::gui {
         std::string preview_src_;
         bool elements_cached_ = false;
         bool controls_dirty_ = true;
-        bool video_path_editor_visible_ = false;
-        bool output_path_editor_visible_ = false;
 
         Rml::Element* title_el_ = nullptr;
         Rml::Element* close_btn_el_ = nullptr;
@@ -215,14 +210,6 @@ namespace lfs::gui {
         Rml::Element* output_value_el_ = nullptr;
         Rml::Element* browse_video_el_ = nullptr;
         Rml::Element* browse_output_el_ = nullptr;
-        Rml::Element* video_path_row_el_ = nullptr;
-        Rml::Element* video_path_input_el_ = nullptr;
-        Rml::Element* video_path_open_el_ = nullptr;
-        Rml::Element* video_path_cancel_el_ = nullptr;
-        Rml::Element* output_path_row_el_ = nullptr;
-        Rml::Element* output_path_input_el_ = nullptr;
-        Rml::Element* output_path_choose_el_ = nullptr;
-        Rml::Element* output_path_cancel_el_ = nullptr;
         Rml::ElementFormControlSelect* mode_select_el_ = nullptr;
         Rml::Element* fps_row_el_ = nullptr;
         Rml::Element* fps_slider_el_ = nullptr;

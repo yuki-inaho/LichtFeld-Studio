@@ -45,13 +45,15 @@
           <span class="trim-separator">-</span>
           <input id="trim-end-input" class="time-input time-input--end" type="text" value="0.0" />
           <button id="btn-trim-end-set" class="btn btn--secondary mini-btn" type="button">Set</button>
-          <button id="btn-trim-reset" class="btn btn--ghost mini-btn" type="button">Reset</button>
+          <button id="btn-trim-reset" class="btn btn--secondary mini-btn" type="button">Reset</button>
           <span id="estimated-frames" class="inline-note">(~0 frames)</span>
         </div>
 
         <div class="section">
           <div class="section-rule">
-            <span>Input Video</span>
+            <span class="section-rule__lead"></span>
+            <span class="section-rule__label">Input Video</span>
+            <span class="section-rule__line"></span>
           </div>
           <div class="file-list">
             <div class="file-row">
@@ -59,29 +61,19 @@
               <span id="video-value" class="path-value">No file selected</span>
               <button id="btn-browse-video" class="btn btn--secondary browse-btn" type="button">Browse...</button>
             </div>
-            <div id="video-path-row" class="file-row path-entry-row">
-              <span class="field-label">Path:</span>
-              <input id="video-path-input" class="path-input" type="text" value="" />
-              <button id="btn-video-path-open" class="btn btn--primary mini-btn" type="button">Open</button>
-              <button id="btn-video-path-cancel" class="btn btn--ghost mini-btn" type="button">Cancel</button>
-            </div>
             <div class="file-row">
               <span class="field-label">Output:</span>
               <span id="output-value" class="path-value">No directory selected</span>
               <button id="btn-browse-output" class="btn btn--secondary browse-btn" type="button">Browse...</button>
-            </div>
-            <div id="output-path-row" class="file-row path-entry-row">
-              <span class="field-label">Folder:</span>
-              <input id="output-path-input" class="path-input" type="text" value="" />
-              <button id="btn-output-path-choose" class="btn btn--primary mini-btn" type="button">Choose</button>
-              <button id="btn-output-path-cancel" class="btn btn--ghost mini-btn" type="button">Cancel</button>
             </div>
           </div>
         </div>
 
         <div class="section">
           <div class="section-rule">
-            <span>Extraction Settings</span>
+            <span class="section-rule__lead"></span>
+            <span class="section-rule__label">Extraction Settings</span>
+            <span class="section-rule__line"></span>
           </div>
           <div class="settings-row">
             <span class="field-label">Mode:</span>
@@ -102,7 +94,9 @@
 
         <div class="section">
           <div class="section-rule">
-            <span>Output Format</span>
+            <span class="section-rule__lead"></span>
+            <span class="section-rule__label">Output Format</span>
+            <span class="section-rule__line"></span>
           </div>
           <div class="settings-row">
             <span class="field-label">Format:</span>
@@ -119,7 +113,9 @@
 
         <div class="section">
           <div class="section-rule">
-            <span>Resolution</span>
+            <span class="section-rule__lead"></span>
+            <span class="section-rule__label">Resolution</span>
+            <span class="section-rule__line"></span>
           </div>
           <div class="settings-row">
             <span class="field-label">Resolution:</span>
@@ -147,7 +143,9 @@
 
         <div class="section">
           <div class="section-rule">
-            <span>Output Naming</span>
+            <span class="section-rule__lead"></span>
+            <span class="section-rule__label">Output Naming</span>
+            <span class="section-rule__line"></span>
           </div>
           <div class="settings-row">
             <span class="field-label">Pattern:</span>
@@ -157,9 +155,11 @@
         </div>
 
         <div class="action-row">
-          <button id="btn-start" class="btn btn--primary action-btn" type="button">Start Extraction</button>
+          <button id="btn-start" class="btn btn--secondary action-btn" type="button">Start Extraction</button>
           <button id="btn-cancel" class="btn btn--secondary action-btn" type="button">Cancel</button>
           <span id="select-hint" class="inline-warning">Select video and output directory</span>
+        </div>
+        <div class="status-row">
           <div id="progress-section" class="status-section">
             <span id="progress-text" class="status-text">Starting extraction...</span>
             <progress id="progress-bar" max="1" value="0"></progress>

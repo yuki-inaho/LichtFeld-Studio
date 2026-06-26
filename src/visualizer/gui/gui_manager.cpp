@@ -3848,7 +3848,7 @@ namespace lfs::vis::gui {
                   make_panel(VideoExtractorPanel(video_widget_.get())),
                   PanelSpace::Floating, 11,
                   0,
-                  1080.0f, 860.0f);
+                  1082.0f, 920.0f);
         reg.set_panel_enabled("native.video_extractor", false);
 
         // Viewport overlays (ordered by draw priority)

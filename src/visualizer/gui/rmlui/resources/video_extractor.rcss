@@ -9,21 +9,40 @@ body {
     flex-direction: column;
 }
 
+.video-extractor-window {
+    min-width: 0;
+    min-height: 0;
+}
+
 #content-wrap {
-    padding: 6dp 8dp 8dp;
+    padding: 6dp 8dp 10dp;
     overflow-y: auto;
+    min-height: 0;
 }
 
 #content {
     display: flex;
     flex-direction: column;
-    gap: 6dp;
+    gap: 8dp;
+    flex: 1;
     min-width: 0;
+    min-height: 0;
+}
+
+.video-extractor-window .btn {
+    height: 22dp;
+    min-height: 22dp;
+    padding: 0 8dp;
+    line-height: 20dp;
+    text-align: center;
+    box-sizing: border-box;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 #preview-shell {
-    height: 150dp;
-    min-height: 150dp;
+    height: 360dp;
+    min-height: 360dp;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -45,16 +64,16 @@ body {
 #transport-row {
     display: flex;
     align-items: center;
-    gap: 6dp;
-    min-height: 28dp;
+    gap: 16dp;
+    min-height: 32dp;
 }
 
 .transport-btn {
-    width: 26dp;
-    height: 26dp;
-    min-width: 26dp;
-    min-height: 26dp;
-    padding: 5dp;
+    width: 20dp;
+    height: 24dp;
+    min-width: 20dp;
+    min-height: 24dp;
+    padding: 3dp 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -74,14 +93,14 @@ body {
 }
 
 .transport-btn img {
-    width: 17dp;
-    height: 17dp;
+    width: 15dp;
+    height: 15dp;
     image-color: #f5f7ff;
 }
 
 .transport-btn--primary img {
-    width: 20dp;
-    height: 20dp;
+    width: 18dp;
+    height: 18dp;
 }
 
 #time-label {
@@ -92,8 +111,8 @@ body {
 
 #timeline {
     position: relative;
-    height: 22dp;
-    min-height: 22dp;
+    height: 20dp;
+    min-height: 20dp;
     background-color: #435966;
     border-width: 1dp;
     border-color: rgba(137, 180, 250, 70);
@@ -124,7 +143,7 @@ body {
     position: absolute;
     top: 0;
     width: 2dp;
-    height: 22dp;
+    height: 20dp;
     margin-left: -1dp;
     background-color: #f5f7ff;
 }
@@ -133,7 +152,7 @@ body {
     position: absolute;
     top: 0;
     width: 3dp;
-    height: 22dp;
+    height: 20dp;
     margin-left: -1dp;
 }
 
@@ -170,11 +189,12 @@ body {
 
 #trim-row,
 .settings-row,
-.action-row {
+.action-row,
+.status-row {
     display: flex;
     align-items: center;
     gap: 8dp;
-    min-height: 26dp;
+    min-height: 24dp;
     min-width: 0;
 }
 
@@ -189,9 +209,9 @@ body {
 }
 
 .time-input {
-    width: 82dp;
-    min-width: 82dp;
-    height: 24dp;
+    width: 80dp;
+    min-width: 80dp;
+    height: 22dp;
 }
 
 .time-input--start {
@@ -220,7 +240,7 @@ body {
 .section {
     display: flex;
     flex-direction: column;
-    gap: 4dp;
+    gap: 5dp;
     min-width: 0;
 }
 
@@ -229,10 +249,26 @@ body {
     align-items: center;
     color: #bac2de;
     gap: 8dp;
-    min-height: 16dp;
-    padding-bottom: 2dp;
-    border-bottom-width: 1dp;
-    border-bottom-color: rgba(88, 91, 112, 170);
+    min-height: 14dp;
+}
+
+.section-rule__lead {
+    width: 12dp;
+    height: 1dp;
+    background-color: rgba(88, 91, 112, 170);
+    flex-shrink: 0;
+}
+
+.section-rule__label {
+    color: #bac2de;
+    flex-shrink: 0;
+}
+
+.section-rule__line {
+    flex: 1;
+    height: 1dp;
+    min-width: 0;
+    background-color: rgba(88, 91, 112, 170);
 }
 
 .file-list {
@@ -246,12 +282,13 @@ body {
     display: flex;
     align-items: center;
     gap: 8dp;
-    min-height: 26dp;
+    min-height: 23dp;
     min-width: 0;
 }
 
 .path-value {
     min-width: 0;
+    max-width: 360dp;
     color: #a6adc8;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -259,45 +296,33 @@ body {
 }
 
 .browse-btn {
-    width: 78dp;
-    min-width: 78dp;
-    height: 24dp;
-}
-
-.path-entry-row {
-    display: none;
-}
-
-.path-input {
-    flex: 1;
-    min-width: 320dp;
-    height: 24dp;
+    min-width: 62dp;
 }
 
 .mini-btn {
-    min-width: 52dp;
-    height: 24dp;
-    padding: 0 8dp;
+    min-width: 38dp;
 }
 
 .action-btn {
     width: 150dp;
     min-width: 150dp;
     height: 30dp;
+    min-height: 30dp;
+    line-height: 28dp;
 }
 
 .wide-select {
     width: 150dp;
     min-width: 150dp;
-    height: 24dp;
-    min-height: 24dp;
+    height: 22dp;
+    min-height: 22dp;
 }
 
 .compact-select {
     width: 80dp;
     min-width: 80dp;
-    height: 24dp;
-    min-height: 24dp;
+    height: 22dp;
+    min-height: 22dp;
 }
 
 .wide-select selectvalue,
@@ -335,13 +360,17 @@ body {
 .dimension-input {
     width: 72dp;
     min-width: 72dp;
-    height: 24dp;
+    height: 22dp;
 }
 
 .pattern-input {
-    width: 190dp;
-    min-width: 190dp;
-    height: 24dp;
+    width: 200dp;
+    min-width: 200dp;
+    height: 22dp;
+}
+
+.status-row {
+    min-height: 0;
 }
 
 .status-section {
