@@ -3157,6 +3157,45 @@ namespace lfs::vis {
         return {};
     }
 
+    std::expected<void, std::string> VksplatViewportRenderer::ensureTrainingSharedScratchReady(
+        VulkanContext& context,
+        const std::size_t num_splats,
+        const glm::ivec2 viewport_size) {
+        if (num_splats == 0 || viewport_size.x <= 0 || viewport_size.y <= 0) {
+            return {};
+        }
+        if (auto ok = ensureInitialized(context); !ok) {
+            return std::unexpected(ok.error());
+        }
+
+        const std::size_t width = static_cast<std::size_t>(viewport_size.x);
+        const std::size_t height = static_cast<std::size_t>(viewport_size.y);
+        if (height != 0 && width > (std::numeric_limits<std::size_t>::max() / height)) {
+            return std::unexpected("VkSplat training shared-scratch prime viewport size overflows size_t");
+        }
+        const std::size_t num_pixels = width * height;
+        const std::size_t tiles_x = (width + TILE_WIDTH - 1) / TILE_WIDTH;
+        const std::size_t tiles_y = (height + TILE_HEIGHT - 1) / TILE_HEIGHT;
+        if (tiles_y != 0 && tiles_x > (std::numeric_limits<std::size_t>::max() / tiles_y)) {
+            return std::unexpected("VkSplat training shared-scratch prime tile count overflows size_t");
+        }
+        const std::size_t num_tiles = tiles_x * tiles_y;
+        const std::size_t sort_capacity =
+            num_splats > (std::numeric_limits<std::size_t>::max() / 4u)
+                ? num_splats
+                : num_splats * 4u;
+        const std::size_t required_shared_scratch =
+            estimateSharedScratchBytes(num_splats,
+                                       num_splats,
+                                       false,
+                                       sort_capacity,
+                                       num_pixels,
+                                       num_tiles);
+
+        releasePrivateScratchBuffers();
+        return ensureSharedScratchArena(context, required_shared_scratch);
+    }
+
     void VksplatViewportRenderer::bindSharedScratchBuffers(
         const std::size_t num_splats,
         const std::size_t visible_capacity,
@@ -6566,6 +6605,8 @@ namespace lfs::vis {
             lod_request_active &&
             splat_data.lod_tree &&
             splat_data.lod_tree->rad_source.valid();
+        static const bool kDisableSharedScratch = (std::getenv("LFS_NO_SHARED_SCRATCH") != nullptr);
+        std::optional<RasterizerArenaRenderGuard> shared_arena_guard;
         std::vector<LodPageCache::PendingUpload> lod_page_uploads;
         std::vector<std::uint32_t> protected_lod_chunks;
         bool lod_page_inputs_active = false;
@@ -7001,7 +7042,6 @@ namespace lfs::vis {
         const std::size_t num_tiles =
             static_cast<std::size_t>(uniforms.grid_width) * static_cast<std::size_t>(uniforms.grid_height);
         bool shared_scratch_bound = false;
-        std::optional<RasterizerArenaRenderGuard> shared_arena_guard;
         std::uint64_t shared_scratch_attempt_id = 0;
         const auto shared_scratch_context = [&]() {
             return std::format(
@@ -7024,7 +7064,6 @@ namespace lfs::vis {
                 render_complete_value_ + 1);
         };
 
-        static const bool kDisableSharedScratch = (std::getenv("LFS_NO_SHARED_SCRATCH") != nullptr);
         if (synchronize_input_upload && !kDisableSharedScratch) {
             // A busy training arena makes this frame fall back to the cached viewport.
             // Do not resize output images until this render is guaranteed to proceed.
@@ -7035,7 +7074,9 @@ namespace lfs::vis {
             shared_scratch_attempt_id = ++shared_scratch_attempt_serial_;
             if (auto ok = ensureSharedScratchArena(context, required_shared_scratch); ok) {
                 try {
-                    shared_arena_guard.emplace();
+                    if (!shared_arena_guard) {
+                        shared_arena_guard.emplace();
+                    }
                     // Now that the render owns the arena frame (training is
                     // excluded), it is safe to re-import the block if training grew
                     // it in place since the last frame — the handle/size are stable.
