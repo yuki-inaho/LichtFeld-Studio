@@ -1191,14 +1191,6 @@ namespace lfs::vis {
         return TrainingRemovalImpact::None;
     }
 
-    bool SceneManager::nodeRemovalAffectsTraining(const std::string& name) const {
-        return classifyTrainingRemovalImpact(name) != TrainingRemovalImpact::None;
-    }
-
-    std::expected<void, std::string> SceneManager::validateNodeRemoval(const std::string& name) const {
-        return validateNodeRemoval(name, classifyTrainingRemovalImpact(name));
-    }
-
     std::expected<void, std::string> SceneManager::validateNodeRemoval(const std::string& name,
                                                                        const TrainingRemovalImpact impact) const {
         auto* trainer = services().trainerOrNull();

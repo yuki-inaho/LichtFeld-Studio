@@ -322,8 +322,6 @@ namespace lfs::vis {
         };
 
         [[nodiscard]] TrainingRemovalImpact classifyTrainingRemovalImpact(const std::string& name) const;
-        [[nodiscard]] bool nodeRemovalAffectsTraining(const std::string& name) const;
-        [[nodiscard]] std::expected<void, std::string> validateNodeRemoval(const std::string& name) const;
         [[nodiscard]] std::expected<void, std::string> validateNodeRemoval(const std::string& name,
                                                                            TrainingRemovalImpact impact) const;
         [[nodiscard]] std::expected<void, std::string> removeNodeImpl(const std::string& name,
