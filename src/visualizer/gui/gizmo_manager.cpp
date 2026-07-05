@@ -1149,7 +1149,7 @@ namespace lfs::vis::gui {
         bool has_valid_bounds = false;
         const bool use_single_bounds_scale = !is_multi_selection && node_gizmo_operation_ == GizmoOperation::Scale;
         const bool use_selection_bounds_scale = is_multi_selection && use_selection_mode &&
-                                            node_gizmo_operation_ == GizmoOperation::Scale;
+                                                node_gizmo_operation_ == GizmoOperation::Scale;
         const bool use_bounds_scale = use_single_bounds_scale || use_selection_bounds_scale;
 
         const auto* first_node = (!is_multi_selection && !target_names.empty())
