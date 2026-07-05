@@ -99,6 +99,9 @@ jobs:
       # CI has a CUDA toolkit but no visible GPU; pin ORT's CUDA build to the
       # portable minimum instead of using CMAKE_CUDA_ARCHITECTURES=native.
       LFS_ORT_CUDA_ARCHS: "75"
+      # vcpkg cleans the environment before running portfiles on Windows, so the
+      # onnxruntime overlay never sees LFS_ORT_CUDA_ARCHS unless it is kept here.
+      VCPKG_KEEP_ENV_VARS: "LFS_ORT_CUDA_ARCHS"
 
     steps:
       - name: Checkout source
