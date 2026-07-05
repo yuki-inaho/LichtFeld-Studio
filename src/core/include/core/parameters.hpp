@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <string>
@@ -336,6 +337,25 @@ namespace lfs::core {
             Mesh2SplatOptions options;
             int sog_iterations = 10;
             bool overwrite = false;
+        };
+
+        enum class PreprocessOutputMode { Depth,
+                                          Normals,
+                                          Both };
+
+        struct LFS_CORE_API PreprocessParameters {
+            std::filesystem::path dataset_path;
+            std::string images_folder = "images";
+            std::filesystem::path model_path;
+            PreprocessOutputMode mode = PreprocessOutputMode::Both;
+            int max_side = 518;
+            std::int64_t num_tokens = 1800;
+            int threads = 0;
+            int png_compression = 1;
+            bool force_cpu = false;
+            bool overwrite = false;
+            bool no_download = false;
+            bool download_only = false;
         };
 
         // Modern C++23 functions returning expected values

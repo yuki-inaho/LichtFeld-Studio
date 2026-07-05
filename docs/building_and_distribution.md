@@ -3,6 +3,7 @@
 ## Requirements
 
 - CUDA Toolkit 12.8+
+- cuDNN for CUDA 12 (CI installs cuDNN 8.9.7 only when the runner image does not already provide it)
 - CMake 3.30+
 - vcpkg (`VCPKG_ROOT` environment variable set)
 - GCC 14+ (Linux) or Visual Studio 2022 v17.10+ (Windows)
@@ -86,6 +87,11 @@ dist/
 | `BUILD_CUDA_MIN_SM` | 75 | Minimum GPU (75=Turing, 80=Ampere, 89=Ada) |
 | `BUILD_TESTS` | OFF | Build test suite |
 | `LFS_ENFORCE_LINUX_GUI_BACKENDS` | ON | Linux only. Fail configure if SDL3 would be built without both X11 and Wayland |
+
+ONNX Runtime CUDA builds use `LFS_ORT_CUDA_ARCHS` when set. CI pins it to `75`
+because hosted runners provide a CUDA toolkit but not a visible GPU for
+`CMAKE_CUDA_ARCHITECTURES=native`; local builds can leave it unset for native
+GPU detection.
 
 ## Troubleshooting
 
