@@ -327,12 +327,12 @@ namespace lfs::vis {
         [[nodiscard]] std::expected<void, std::string> validateNodeRemoval(const std::string& name,
                                                                            TrainingRemovalImpact impact) const;
         [[nodiscard]] std::expected<void, std::string> removeNodeImpl(const std::string& name,
-                                                                       bool keep_children,
-                                                                       HistoryMode history_mode);
+                                                                      bool keep_children,
+                                                                      HistoryMode history_mode);
         [[nodiscard]] std::expected<void, std::string> removeNodeImpl(const std::string& name,
-                                                                       bool keep_children,
-                                                                       HistoryMode history_mode,
-                                                                       TrainingRemovalImpact impact);
+                                                                      bool keep_children,
+                                                                      HistoryMode history_mode,
+                                                                      TrainingRemovalImpact impact);
         // Drop the GUI's borrowed scene-image tensor and drain the GPU so no in-flight
         // Vulkan work references model tensors that are about to be freed. Must run
         // before releasing splat models, especially when their tensors are backed by
