@@ -6968,6 +6968,11 @@ namespace lfs::vis::gui {
             return {.blocks_pointer = true, .takes_keyboard_focus = true};
         }
 
+        if (rmlui_manager_.activeOverlayContainsPoint(static_cast<float>(x),
+                                                      static_cast<float>(y))) {
+            return {.blocks_pointer = true, .takes_keyboard_focus = true};
+        }
+
         if (panel_layout_.isResizingPanel() || isPositionOverFloatingPanel(x, y)) {
             return {.blocks_pointer = true, .takes_keyboard_focus = true};
         }
