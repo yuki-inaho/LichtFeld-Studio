@@ -296,13 +296,6 @@
     "build_info.commit": "Commit",
     "build_info.build_type": "Tipo de Compilación",
     "build_info.platform": "Plataforma",
-    "build_type.debug": "Debug",
-    "build_type.release": "Release",
-    "platform.windows": "Windows",
-    "platform.linux": "Linux",
-    "platform.unknown": "Desconocido",
-    "interop.enabled": "Habilitado",
-    "interop.disabled": "Deshabilitado",
     "links": "ENLACES",
     "repository": "Repositorio:",
     "website": "Sitio Web:",
@@ -570,6 +563,10 @@
     "ok": "Aceptar",
     "error": "Error: %s",
     "dismiss": "Descartar"
+  },
+  "selection_group": {
+    "lock": "Bloquear",
+    "unlock": "Desbloquear"
   },
   "training": {
     "options.strategy.igs_plus": "IGS+",

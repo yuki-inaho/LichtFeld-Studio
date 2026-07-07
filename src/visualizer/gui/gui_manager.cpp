@@ -5383,9 +5383,9 @@ namespace lfs::vis::gui {
             auto& focus = guiFocusState();
             focus.reset();
             // Seed from ImGui only; RmlUi panels populate their own claims during
-            // processInput. Aggregating wantsCaptureMouse() here reads stale hover
-            // state from the previous frame, which becomes self-perpetuating once a
-            // panel sets a hover element — toolbar tools then cannot be activated.
+            // processInput. Aggregating RmlUi's mouse-capture state here reads stale
+            // hover state from the previous frame, which becomes self-perpetuating once
+            // a panel sets a hover element — toolbar tools then cannot be activated.
             const ImGuiIO& io = ImGui::GetIO();
             focus.want_capture_mouse = io.WantCaptureMouse;
             focus.want_capture_keyboard = io.WantCaptureKeyboard || rmlui_manager_.wantsCaptureKeyboard();
