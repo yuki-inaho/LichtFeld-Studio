@@ -7,9 +7,9 @@
 
 #include "Cameras.cuh"
 #include "Common.h"
-#include "core/cuda_safe_format.hpp"
 #include "Rasterization.h"
 #include "Utils.cuh"
+#include "core/cuda_safe_format.hpp"
 
 // Use standard CUDA atomic add
 #ifndef gpuAtomicAdd
