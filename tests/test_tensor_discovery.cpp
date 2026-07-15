@@ -135,14 +135,10 @@ TEST(DiscoverySweep, EmptyReductionSemanticsMatchTorch) {
         << "mean(empty) must be NaN, not an additive identity";
     EXPECT_THROW({
         const auto ignored = input.max();
-        (void)ignored;
-    },
-                 std::runtime_error);
+        (void)ignored; }, std::runtime_error);
     EXPECT_THROW({
         const auto ignored = input.min();
-        (void)ignored;
-    },
-                 std::runtime_error);
+        (void)ignored; }, std::runtime_error);
 }
 
 TEST(DiscoverySweep, BoolReductionDtypesAndDomainsMatchTorch) {
@@ -154,14 +150,10 @@ TEST(DiscoverySweep, BoolReductionDtypesAndDomainsMatchTorch) {
 
     EXPECT_THROW({
         const auto ignored = reference.mean();
-        (void)ignored;
-    },
-                 c10::Error);
+        (void)ignored; }, c10::Error);
     EXPECT_THROW({
         const auto ignored = input.mean();
-        (void)ignored;
-    },
-                 std::runtime_error);
+        (void)ignored; }, std::runtime_error);
 
     const auto expected_max = reference.max();
     const auto expected_min = reference.min();
@@ -1162,9 +1154,7 @@ TEST(DiscoverySweep, IntegerPowScalarOverloadRejectsNegativeIntegerExponent) {
 
         EXPECT_THROW({
             const auto result = input.pow(-1);
-            (void)result.cpu().to_vector_int();
-        },
-                     std::runtime_error);
+            (void)result.cpu().to_vector_int(); }, std::runtime_error);
     }
 }
 
