@@ -2813,7 +2813,10 @@ namespace lfs::training {
             // Re-initialize strategy with new parameters
             strategy_->set_training_dataset(train_dataset_);
             strategy_->initialize(get_runtime_optimization_params());
-            apply_frozen_ranges_to_optimizer(splat, strategy_->get_optimizer());
+            apply_frozen_ranges_to_optimizer(
+                splat,
+                strategy_->get_optimizer(),
+                params_.freeze_lr_scale);
             {
                 std::unique_lock<std::shared_mutex> render_lock(render_mutex_);
                 if (auto result = ensureModelTensorAllocatorStorage(splat, "strategy initialization"); !result) {
@@ -5942,8 +5945,8 @@ namespace lfs::training {
                 !storage_result) {
                 return std::unexpected(storage_result.error());
             }
+            apply_frozen_ranges_to_optimizer(strategy_->get_model(), strategy_->get_optimizer());
         }
-
         if (params_.optimization.enable_sparsity) {
             const size_t stop_refine_limit = static_cast<size_t>(std::max(0, get_regular_iterations()));
             if (params_.optimization.stop_refine > stop_refine_limit) {

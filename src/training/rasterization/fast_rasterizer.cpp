@@ -638,6 +638,7 @@ namespace lfs::training {
             dst.exp_avg_sq_scale = src.exp_avg_sq_scale;
             dst.frozen_mask = src.frozen_mask;
             dst.frozen_mask_size = src.frozen_mask_size;
+            dst.frozen_lr_scale = src.frozen_lr_scale;
             dst.n_elements = src.n_elements;
             dst.n_attributes = src.n_attributes;
             dst.step_size = src.step_size;

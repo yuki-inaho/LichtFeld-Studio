@@ -60,6 +60,7 @@ namespace fast_lfs::optimizer {
         const float* param_grad,
         const bool* frozen_mask,
         const int frozen_mask_size,
+        const float frozen_lr_scale,
         const int n_rows,
         const int row_size,
         const float lr,
@@ -82,8 +83,8 @@ namespace fast_lfs::optimizer {
 
         adam_step_quantized(
             param, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale,
-            param_grad, frozen_mask, frozen_mask_size, n_rows, row_size, lr, beta1, beta2, eps,
-            bias_correction1_rcp, bias_correction2_sqrt_rcp, stream);
+            param_grad, frozen_mask, frozen_mask_size, frozen_lr_scale, n_rows, row_size, lr,
+            beta1, beta2, eps, bias_correction1_rcp, bias_correction2_sqrt_rcp, stream);
     }
 
     void adam_step_quantized_swizzled_raw(
@@ -95,6 +96,7 @@ namespace fast_lfs::optimizer {
         const float* param_grad,
         const bool* frozen_mask,
         const int frozen_mask_size,
+        const float frozen_lr_scale,
         const int n_primitives,
         const int slots_per_primitive,
         const float lr,
@@ -117,8 +119,9 @@ namespace fast_lfs::optimizer {
 
         adam_step_quantized_swizzled(
             param, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale,
-            param_grad, frozen_mask, frozen_mask_size, n_primitives, slots_per_primitive,
-            lr, beta1, beta2, eps, bias_correction1_rcp, bias_correction2_sqrt_rcp, stream);
+            param_grad, frozen_mask, frozen_mask_size, frozen_lr_scale, n_primitives,
+            slots_per_primitive, lr, beta1, beta2, eps, bias_correction1_rcp,
+            bias_correction2_sqrt_rcp, stream);
     }
 
     void quantize_adam_moments_raw(
