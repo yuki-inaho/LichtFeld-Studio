@@ -109,7 +109,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvImageCodec/CMakeLists.txt")
     endif()
     set(BUILD_NVJPEG_EXT ON CACHE BOOL "" FORCE)
     set(BUILD_NVJPEG2K_EXT ON CACHE BOOL "" FORCE)
-    set(WITH_DYNAMIC_NVJPEG OFF CACHE BOOL "" FORCE)
+    # Preserve the historical static-link default, but allow package
+    # environments that provide only the shared nvJPEG library to opt in.
+    if(NOT DEFINED WITH_DYNAMIC_NVJPEG)
+        set(WITH_DYNAMIC_NVJPEG OFF CACHE BOOL "" FORCE)
+    endif()
     set(WITH_DYNAMIC_NVJPEG2K ON CACHE BOOL "" FORCE)
     add_subdirectory(nvImageCodec EXCLUDE_FROM_ALL)
 else()

@@ -23,6 +23,7 @@ data
 !tests/python/**/*.py
 !docs/plugins/examples/**/*.py
 .venv/
+.pixi/
 *.png
 !src/**/assets/**/*.png
 *.sqlite

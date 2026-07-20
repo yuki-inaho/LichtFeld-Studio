@@ -1,0 +1,67 @@
+/* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later */
+
+#pragma once
+
+// GCC 13's libstdc++ does not provide C++23 <print>.  Prefer the standard
+// header when a newer toolchain has it, and provide the same small API surface
+// through the project's already-linked fmt dependency otherwise.
+#if defined(__has_include_next)
+#    if __has_include_next(<print>)
+#        include_next <print>
+#        define LFS_HAS_STD_PRINT 1
+#    endif
+#endif
+
+#ifndef LFS_HAS_STD_PRINT
+
+#    include <cstdio>
+#    include <fmt/format.h>
+#    include <string>
+#    include <utility>
+
+namespace lfs::std_print_detail {
+
+    template <typename... Args>
+    std::string format(fmt::format_string<Args...> format_string, Args&&... args) {
+        return fmt::vformat(format_string, fmt::make_format_args(args...));
+    }
+
+    inline void write(std::FILE* stream, const std::string& text) {
+        std::fwrite(text.data(), sizeof(char), text.size(), stream);
+    }
+
+} // namespace lfs::std_print_detail
+
+namespace std {
+
+    template <typename... Args>
+    void print(fmt::format_string<Args...> format_string, Args&&... args) {
+        lfs::std_print_detail::write(stdout,
+                                     lfs::std_print_detail::format(format_string,
+                                                                   std::forward<Args>(args)...));
+    }
+
+    template <typename... Args>
+    void print(std::FILE* stream, fmt::format_string<Args...> format_string, Args&&... args) {
+        lfs::std_print_detail::write(stream,
+                                     lfs::std_print_detail::format(format_string,
+                                                                   std::forward<Args>(args)...));
+    }
+
+    template <typename... Args>
+    void println(fmt::format_string<Args...> format_string, Args&&... args) {
+        ::std::print(format_string, std::forward<Args>(args)...);
+        std::fputc('\n', stdout);
+    }
+
+    template <typename... Args>
+    void println(std::FILE* stream, fmt::format_string<Args...> format_string, Args&&... args) {
+        ::std::print(stream, format_string, std::forward<Args>(args)...);
+        std::fputc('\n', stream);
+    }
+
+} // namespace std
+
+#endif

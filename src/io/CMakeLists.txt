@@ -325,6 +325,13 @@ target_compile_features(lfs_io PUBLIC cxx_std_23)
 # Enable position-independent code for shared library linking (Python module)
 set_target_properties(lfs_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# vcpkg's USD shared libraries keep some VtArray inline symbols local.  The
+# USD format implementation is compiled into this static library and later
+# linked into the app/Python-facing shared libraries, so retain default
+# visibility for its inline instantiations instead of emitting unresolved
+# references that USD cannot satisfy at runtime.
+target_compile_options(lfs_io PRIVATE -fno-visibility-inlines-hidden)
+
 # Compiler options
 target_compile_options(lfs_io PRIVATE
         $<$<CXX_COMPILER_FRONTEND_VARIANT:GNU>:-Wall -Wextra -Wpedantic>

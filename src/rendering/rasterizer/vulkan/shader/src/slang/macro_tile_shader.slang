@@ -62,7 +62,7 @@ rectangle load_rect(int32_t primitive_idx,
     rect.max_y = (uint16_t)(rect_tile_space[2*primitive_idx+1] >> 16);
     return rect;
 #else
-    return reinterpret<rectangle>(rect_tile_space[primitive_idx]);
+    return unpack_rectangle(rect_tile_space[primitive_idx]);
 #endif
 }
 

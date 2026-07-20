@@ -1,0 +1,9 @@
+# conda-forge's xfixes.pc currently requires fixesproto >= 6 while the
+# compatible protocol package is published as version 5.0.  The library and
+# headers are already supplied by the Pixi environment; this file only
+# provides the compatible pkg-config version metadata.
+Name: FixesProto
+Description: X Fixes extension headers compatibility metadata
+Version: 6.0
+Requires: xextproto >= 7.0.99.1
+Cflags:

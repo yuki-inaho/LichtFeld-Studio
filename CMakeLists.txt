@@ -579,6 +579,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # External dependencies (EXCLUDE_FROM_ALL to handle install ourselves)
+# NVTX3 is vendored with nvImageCodec and is header-only.  Keep its include
+# path visible to LichtFeld's CUDA and C++ targets as well as the vendored
+# codec targets; CUDA 12 no longer ships the legacy nvToolsExt library.
+set(LFS_NVTX_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/external/nvImageCodec/external/NVTX/c/include")
+if(EXISTS "${LFS_NVTX_INCLUDE_DIR}/nvtx3/nvToolsExt.h")
+    include_directories(SYSTEM "${LFS_NVTX_INCLUDE_DIR}")
+endif()
 add_subdirectory(external EXCLUDE_FROM_ALL)
 
 # Keep LichtFeld's ordinary MSVC translation units on nvcc's conforming host
