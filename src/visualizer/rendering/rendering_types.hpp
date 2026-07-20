@@ -29,12 +29,20 @@ namespace lfs::vis {
     inline constexpr float DEFAULT_LOD_OUTSIDE_VIEW_FOVEATION = 0.05f;
     inline constexpr float DEFAULT_LOD_PREFETCH_PIXEL_SCALE_RATIO = 0.65f;
     inline constexpr std::size_t DEFAULT_LOD_PAGE_POOL_SPLATS = 0; // 0 = auto (derived from lod_max_splats)
+    inline constexpr float DEFAULT_LOD_POOL_VRAM_FRACTION = 0.15f; // out-of-core page pool share of free VRAM
+    inline constexpr int DEFAULT_LOD_FADE_FRAMES = 12;             // fade-in of newly streamed pages (0 = off)
 
     enum class SplitViewMode {
         Disabled,
         PLYComparison,
         GTComparison,
         IndependentDual
+    };
+
+    enum class GTComparisonMode {
+        RGB = 0,
+        Normal = 1,
+        Depth = 2,
     };
 
     enum class SplitViewPanelId : uint8_t {
@@ -117,6 +125,8 @@ namespace lfs::vis {
         Polygon,
         Lasso,
         Rings,
+        Box,
+        Sphere,
         Color
     };
 
@@ -228,6 +238,7 @@ namespace lfs::vis {
 
         // Split view
         SplitViewMode split_view_mode = SplitViewMode::Disabled;
+        GTComparisonMode gt_comparison_mode = GTComparisonMode::RGB;
         float split_position = 0.5f;
         size_t split_view_offset = 0;
 
@@ -276,8 +287,10 @@ namespace lfs::vis {
         float lod_cone_foveation = DEFAULT_LOD_CONE_FOVEATION;
         float lod_cone_inner_degrees = DEFAULT_LOD_CONE_INNER_DEGREES;
         float lod_cone_outer_degrees = DEFAULT_LOD_CONE_OUTER_DEGREES;
-        size_t lod_page_pool_splats = DEFAULT_LOD_PAGE_POOL_SPLATS; // VRAM page-pool budget for RAD streaming (0 = auto)
-        bool lod_debug_colors = false;                              // Per-level color tinting
+        size_t lod_page_pool_splats = DEFAULT_LOD_PAGE_POOL_SPLATS;    // VRAM page-pool budget for RAD streaming (0 = auto)
+        float lod_pool_vram_fraction = DEFAULT_LOD_POOL_VRAM_FRACTION; // out-of-core pool share of free VRAM
+        int lod_fade_frames = DEFAULT_LOD_FADE_FRAMES;                 // newly streamed pages fade in over N frames
+        bool lod_debug_colors = false;                                 // Per-level color tinting
     };
 
     inline void sanitizeDepthViewSettings(RenderSettings& settings) {
@@ -304,6 +317,18 @@ namespace lfs::vis {
             break;
         default:
             settings.depth_visualization_mode = lfs::rendering::DepthVisualizationMode::Palette;
+            break;
+        }
+    }
+
+    inline void sanitizeGTComparisonSettings(RenderSettings& settings) {
+        switch (settings.gt_comparison_mode) {
+        case GTComparisonMode::RGB:
+        case GTComparisonMode::Normal:
+        case GTComparisonMode::Depth:
+            break;
+        default:
+            settings.gt_comparison_mode = GTComparisonMode::RGB;
             break;
         }
     }

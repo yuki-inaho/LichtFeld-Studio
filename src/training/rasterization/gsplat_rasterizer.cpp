@@ -5,6 +5,7 @@
 #include "gsplat_rasterizer.hpp"
 #include "core/cuda/memory_arena.hpp"
 #include "core/logger.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "gsplat/Ops.h"
 #include "training/kernels/grad_alpha.hpp"
 #include <array>
@@ -30,7 +31,7 @@ namespace lfs::training {
 
         // Begin arena frame for memory allocation
         auto& arena = core::GlobalArenaManager::instance().get_arena();
-        uint64_t frame_id = arena.begin_frame();
+        uint64_t frame_id = arena.begin_frame(core::getCurrentCUDAStream());
         auto arena_allocator = arena.get_allocator(frame_id);
         void* isect_ids_to_free = nullptr;
         void* flatten_ids_to_free = nullptr;
@@ -92,14 +93,22 @@ namespace lfs::training {
                 }
             }
 
-            const cudaStream_t fwd_stream = means.stream();
+            // Current-stream-first (the caller's guard), tensor stream as
+            // fallback — matches the lib-wide rule and the begin_frame stream,
+            // so a metrics-thread render lands its kernels and consumers on the
+            // same stream as the arena frame.
+            const cudaStream_t fwd_stream = core::getCurrentCUDAStream()
+                                                ? core::getCurrentCUDAStream()
+                                                : means.stream();
 
             // Keep K tensor cached and update values in-place to avoid per-call allocations.
             thread_local core::Tensor cached_K_tensor;
-            if (!cached_K_tensor.is_valid() || cached_K_tensor.numel() != 9) {
+            if (!cached_K_tensor.is_valid() || cached_K_tensor.numel() != 9 ||
+                cached_K_tensor.stream() != fwd_stream) {
                 cached_K_tensor = core::Tensor::empty({1, 3, 3}, core::Device::CUDA, core::DataType::Float32);
+                if (cached_K_tensor.stream() != fwd_stream)
+                    cached_K_tensor.set_stream(fwd_stream);
             }
-            cached_K_tensor.set_stream(fwd_stream);
             const std::array<float, 9> K_host = {
                 k00, 0.0f, k02,
                 0.0f, k11, k12,
@@ -373,10 +382,12 @@ namespace lfs::training {
 
                 const size_t image_channels = image_hwc.shape()[2];
                 const core::TensorShape image_shape = {image_channels, static_cast<size_t>(H), static_cast<size_t>(W)};
-                if (!cached_image_chw.is_valid() || cached_image_chw.shape() != image_shape) {
+                if (!cached_image_chw.is_valid() || cached_image_chw.shape() != image_shape ||
+                    cached_image_chw.stream() != fwd_stream) {
                     cached_image_chw = core::Tensor::empty(image_shape, core::Device::CUDA, core::DataType::Float32);
+                    if (cached_image_chw.stream() != fwd_stream)
+                        cached_image_chw.set_stream(fwd_stream);
                 }
-                cached_image_chw.set_stream(fwd_stream);
 
                 kernels::launch_permute_hwc_to_chw(
                     image_hwc.ptr<float>(),
@@ -390,10 +401,12 @@ namespace lfs::training {
             }
 
             const core::TensorShape alpha_shape = {1UL, static_cast<size_t>(H), static_cast<size_t>(W)};
-            if (!cached_alpha_chw.is_valid() || cached_alpha_chw.shape() != alpha_shape) {
+            if (!cached_alpha_chw.is_valid() || cached_alpha_chw.shape() != alpha_shape ||
+                cached_alpha_chw.stream() != fwd_stream) {
                 cached_alpha_chw = core::Tensor::empty(alpha_shape, core::Device::CUDA, core::DataType::Float32);
+                if (cached_alpha_chw.stream() != fwd_stream)
+                    cached_alpha_chw.set_stream(fwd_stream);
             }
-            cached_alpha_chw.set_stream(fwd_stream);
             cudaMemcpyAsync(
                 cached_alpha_chw.ptr<float>(),
                 render_alphas_ptr_out,
@@ -409,10 +422,12 @@ namespace lfs::training {
                 }
 
                 const core::TensorShape depth_shape = {1UL, static_cast<size_t>(H), static_cast<size_t>(W)};
-                if (!cached_depth_chw.is_valid() || cached_depth_chw.shape() != depth_shape) {
+                if (!cached_depth_chw.is_valid() || cached_depth_chw.shape() != depth_shape ||
+                    cached_depth_chw.stream() != fwd_stream) {
                     cached_depth_chw = core::Tensor::empty(depth_shape, core::Device::CUDA, core::DataType::Float32);
+                    if (cached_depth_chw.stream() != fwd_stream)
+                        cached_depth_chw.set_stream(fwd_stream);
                 }
-                cached_depth_chw.set_stream(fwd_stream);
                 cudaMemcpyAsync(
                     cached_depth_chw.ptr<float>(),
                     depth_hwc.ptr<float>(),
@@ -491,6 +506,7 @@ namespace lfs::training {
             ctx.render_mode = render_mode;
             ctx.camera_model = camera_model;
             ctx.frame_id = frame_id;
+            ctx.stream = fwd_stream;
             ctx.render_tile_x_offset = tile_x_offset;
             ctx.render_tile_y_offset = tile_y_offset;
             ctx.render_tile_width = tile_width;
@@ -504,7 +520,10 @@ namespace lfs::training {
             if (flatten_ids_to_free != nullptr) {
                 cudaFree(flatten_ids_to_free);
             }
-            arena.end_frame(frame_id);
+            // End on the same stream begin_frame used (same guard → same value),
+            // not the streamless device-sync path, so the arena frame chain stays
+            // intact for the next frame instead of falling back to a full sync.
+            arena.end_frame(frame_id, core::getCurrentCUDAStream());
             throw;
         }
     }
@@ -520,6 +539,15 @@ namespace lfs::training {
         // Get arena for temporary allocations
         auto& arena = core::GlobalArenaManager::instance().get_arena();
         auto arena_allocator = arena.get_allocator(ctx.frame_id);
+        // Run the backward work + arena frame release on the exact stream the
+        // forward began the frame on (ctx.stream), so begin_frame and end_frame
+        // chain on the same stream rather than relying on the caller's guard
+        // matching. Falls back to the current/tensor stream only if unset.
+        const cudaStream_t stream = ctx.stream
+                                        ? ctx.stream
+                                        : (core::getCurrentCUDAStream()
+                                               ? core::getCurrentCUDAStream()
+                                               : ctx.means.stream());
         try {
 
             const uint32_t N = ctx.N;
@@ -527,7 +555,6 @@ namespace lfs::training {
             const uint32_t H = ctx.image_height;
             const uint32_t W = ctx.image_width;
             const uint32_t channels = ctx.channels;
-            const cudaStream_t stream = ctx.means.stream();
 
             // Calculate sizes for arena allocation
             auto align = [](size_t size, size_t alignment = 128) {
@@ -791,22 +818,24 @@ namespace lfs::training {
 
             // Free internally allocated buffers from forward
             if (ctx.isect_ids_ptr != nullptr) {
-                cudaFree(ctx.isect_ids_ptr);
+                cudaFreeAsync(ctx.isect_ids_ptr, stream);
             }
             if (ctx.flatten_ids_ptr != nullptr) {
-                cudaFree(ctx.flatten_ids_ptr);
+                cudaFreeAsync(ctx.flatten_ids_ptr, stream);
             }
 
-            // End arena frame to release memory from forward pass
-            arena.end_frame(ctx.frame_id);
+            // End arena frame to release memory from forward pass — on the
+            // backward's stream (where its kernels ran), not the re-derived
+            // current stream.
+            arena.end_frame(ctx.frame_id, stream);
         } catch (...) {
             if (ctx.isect_ids_ptr != nullptr) {
-                cudaFree(ctx.isect_ids_ptr);
+                cudaFreeAsync(ctx.isect_ids_ptr, stream);
             }
             if (ctx.flatten_ids_ptr != nullptr) {
-                cudaFree(ctx.flatten_ids_ptr);
+                cudaFreeAsync(ctx.flatten_ids_ptr, stream);
             }
-            arena.end_frame(ctx.frame_id);
+            arena.end_frame(ctx.frame_id, stream);
             throw;
         }
     }

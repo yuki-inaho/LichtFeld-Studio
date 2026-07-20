@@ -44,6 +44,7 @@ namespace lfs::vis::gui {
         bool wantsKeyboard() const override { return host_.wantsKeyboard(); }
         bool needsAnimationFrame() const override { return host_.needsAnimationFrame(); }
         void reloadRmlResources() override;
+        void releaseRendererResources() override { host_.releaseRendererResources(); }
 
     private:
         struct EventListener : Rml::EventListener {
@@ -76,6 +77,7 @@ namespace lfs::vis::gui {
             uint64_t log_generation = 0;
             lfs::core::LogLevel log_level = lfs::core::LogLevel::Off;
             uint64_t language_generation = 0;
+            uint64_t render_settings_generation = 0;
             int dp_ratio_milli = 1000;
             bool invert_masks = false;
 
@@ -113,6 +115,7 @@ namespace lfs::vis::gui {
         Rml::Element* scene_tab_el_ = nullptr;
         Rml::Element* history_tab_el_ = nullptr;
         Rml::Element* logging_tab_el_ = nullptr;
+        Rml::Element* asset_manager_button_el_ = nullptr;
         Rml::Element* chip_row_el_ = nullptr;
         Rml::Element* summary_model_chip_el_ = nullptr;
         Rml::Element* summary_node_chip_el_ = nullptr;

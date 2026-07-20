@@ -73,6 +73,7 @@ namespace lfs::python {
         int selection_submode = 0;
         int pivot_mode = 0;
         int transform_space = 0;
+        int multi_transform_mode = 0;
 
         // Viewport (set before UI drawing)
         float vp_x = 0, vp_y = 0, vp_w = 0, vp_h = 0;
@@ -95,6 +96,23 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API uint64_t pre_scene_panel_sync_generation();
     using MainLoopWakeCallback = void (*)();
     LFS_PYTHON_RUNTIME_API void set_main_loop_wake_callback(MainLoopWakeCallback cb);
+
+    struct StartupPluginLoadStatus {
+        std::string state = "not_started";
+        std::string phase = "idle";
+        std::string plugin;
+        std::string detail;
+        std::size_t attempted = 0;
+        std::size_t total = 0;
+        std::size_t failed = 0;
+        float progress = 0.0f;
+        bool active = false;
+        std::uint64_t revision = 0;
+    };
+
+    LFS_PYTHON_RUNTIME_API void set_startup_plugin_load_status(
+        const StartupPluginLoadStatus& status);
+    LFS_PYTHON_RUNTIME_API StartupPluginLoadStatus get_startup_plugin_load_status();
 
     using CleanupCallback = void (*)();
     using EnsureInitializedCallback = void (*)();
@@ -177,11 +195,13 @@ namespace lfs::python {
 
     using ExportCallback = void (*)(int format, const char* path, const char** node_names,
                                     int node_count, int sh_degree,
-                                    bool rad_flip_y);
+                                    bool rad_flip_y,
+                                    bool rad_streamable);
     LFS_PYTHON_RUNTIME_API void set_export_callback(ExportCallback cb);
     LFS_PYTHON_RUNTIME_API void invoke_export(int format, const std::string& path,
                                               const std::vector<std::string>& node_names, int sh_degree,
-                                              bool rad_flip_y = false);
+                                              bool rad_flip_y = false,
+                                              bool rad_streamable = true);
 
     using HasToolbarCallback = bool (*)();
 
@@ -194,7 +214,7 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API void cancel_active_operator();
     LFS_PYTHON_RUNTIME_API bool invoke_operator(const std::string& operator_id);
 
-    // Selection sub-mode (mirrors panels::SelectionSubMode for Python access)
+    // Selection sub-mode (mirrors vis::SelectionSubMode for Python access)
     LFS_PYTHON_RUNTIME_API void set_selection_submode(int mode);
     LFS_PYTHON_RUNTIME_API int get_selection_submode();
 
@@ -500,6 +520,14 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API int get_transform_space();
     LFS_PYTHON_RUNTIME_API void set_transform_space(int space);
 
+    // Multi-transform mode (selection/individual for transform gizmos)
+    using GetMultiTransformModeCallback = int (*)();
+    using SetMultiTransformModeCallback = void (*)(int);
+    LFS_PYTHON_RUNTIME_API void set_multi_transform_mode_callbacks(GetMultiTransformModeCallback get_cb,
+                                                                   SetMultiTransformModeCallback set_cb);
+    LFS_PYTHON_RUNTIME_API int get_multi_transform_mode();
+    LFS_PYTHON_RUNTIME_API void set_multi_transform_mode(int mode);
+
     LFS_PYTHON_RUNTIME_API void set_scene_manager(vis::SceneManager* sm);
     LFS_PYTHON_RUNTIME_API vis::SceneManager* get_scene_manager();
 
@@ -587,6 +615,7 @@ namespace lfs::python {
 
     LFS_PYTHON_RUNTIME_API void set_ui_texture_service(CreateTextureFn create, DeleteTextureFn del,
                                                        MaxTextureSizeFn max_size);
+    LFS_PYTHON_RUNTIME_API void require_ui_texture_creation_thread();
     LFS_PYTHON_RUNTIME_API TextureResult create_ui_texture(const unsigned char* data, int w, int h, int channels);
     LFS_PYTHON_RUNTIME_API void delete_ui_texture(uint64_t texture_id);
     LFS_PYTHON_RUNTIME_API int get_max_texture_size();

@@ -119,7 +119,7 @@ groupshared float2 collected_xy_vs[TILE_SIZE];
 groupshared float4 collected_inv_cov_vs_opacity[TILE_SIZE];
 #endif
 
-groupshared uint32_t collected_idx[TILE_SIZE];
+groupshared uint32_t active_subgroups[TILE_SIZE / SUBGROUP_SIZE];
 groupshared uint32_t collected_gauss_idx[TILE_SIZE];
 
 #if SUBTILE_SIZE > 0
@@ -275,6 +275,8 @@ void main(
     #endif
     float4 curr_pixel_state = float4(0, 0, 0, 1);
     float median_depth = FAR_DEPTH;
+    float weighted_depth = 0.0f;
+    float weighted_alpha = 0.0f;
     bool is_inside = (pix_coord.x < W && pix_coord.y < H);
     bool thread_active = is_inside;
 
@@ -304,21 +306,20 @@ void main(
     {
         // break if thread_active is false for all, doesn't seem to speed up
         // equivalent to CUDA `if (__syncthreads_count(thread_active) == 0) break;`
-        uint subgroup_idx = thread_rank / SUBGROUP_SIZE;
-        uint32_t thread_active_u = uint32_t(WaveActiveAnyTrue(thread_active));
+        const uint subgroup_idx = thread_rank / SUBGROUP_SIZE;
+        const uint32_t subgroup_has_active_thread =
+            uint32_t(WaveActiveAnyTrue(thread_active));
         if (WaveIsFirstLane())
-            collected_idx[subgroup_idx] = thread_active_u;
+            active_subgroups[subgroup_idx] = subgroup_has_active_thread;
         GroupMemoryBarrierWithGroupSync();
-        for (int s = 1; s < TILE_SIZE/SUBGROUP_SIZE; s <<= 1) {
-            if (thread_rank < TILE_SIZE/SUBGROUP_SIZE) {
-                thread_active_u += collected_idx[(thread_rank+s)%TILE_SIZE];
-                collected_idx[thread_rank] = thread_active_u;
-            }
-            GroupMemoryBarrierWithGroupSync();
+        if (thread_rank == 0u) {
+            uint32_t any_active = 0u;
+            for (uint s = 0u; s < TILE_SIZE / SUBGROUP_SIZE; ++s)
+                any_active |= active_subgroups[s];
+            active_subgroups[0] = any_active;
         }
-        if (SUBGROUP_SIZE*SUBGROUP_SIZE >= TILE_SIZE)
-            GroupMemoryBarrierWithGroupSync();
-        if (collected_idx[0] == 0)
+        GroupMemoryBarrierWithGroupSync();
+        if (active_subgroups[0] == 0u)
             break;
 
         // Collectively fetch per-Gaussian data from global to shared
@@ -446,7 +447,13 @@ void main(
                                                             overlay_splat.xy_vs,
                                                             flags,
                                                             overlay_params);
-                gauss_rgba = apply_ring_overlay(gauss_rgba, overlay_splat, center_pix_coord, flags, overlay_params);
+                gauss_rgba = apply_ring_overlay(gauss_rgba,
+                                                overlay_splat,
+                                                center_pix_coord,
+                                                sel_status,
+                                                flags,
+                                                overlay_params,
+                                                selection_colors);
 
                 if (overlay_enabled(overlay_params[OVERLAY_PARAM_MARKER_FLAGS].y) && selectable) {
                     const float INNER_RADIUS_SQ = 2.25f;
@@ -457,10 +464,7 @@ void main(
                     if (dist_sq > OUTER_RADIUS_SQ)
                         continue;
 
-                    uint group_id = sel_status & SELECTION_GROUP_MASK;
-                    bool is_preview = (sel_status & SELECTION_PREVIEW_FLAG) != 0u;
-                    float3 marker_color = is_preview ? selection_colors[SELECTION_PREVIEW_COLOR_INDEX].xyz
-                                                     : selection_colors[group_id].xyz;
+                    float3 marker_color = selection_overlay_target_color(sel_status, selection_colors);
                     if (dist_sq > INNER_RADIUS_SQ)
                         marker_color *= OUTLINE_DARKEN;
 
@@ -477,6 +481,11 @@ void main(
             #endif
 
                 float4 new_pixel_state = update_pixel_state(curr_pixel_state, gauss_rgba);
+                if (uniforms.expected_far > 0.0f && splat_depth <= uniforms.expected_far) {
+                    float depth_weight = gauss_rgba.a * curr_pixel_state.a;
+                    weighted_depth += depth_weight * splat_depth;
+                    weighted_alpha += depth_weight;
+                }
                 if (median_depth >= FAR_DEPTH && curr_pixel_state.a > 0.5f && new_pixel_state.a <= 0.5f) {
                     median_depth = splat_depth;
                 }
@@ -490,14 +499,25 @@ void main(
             }
         }
         splats_left_to_process -= TILE_SIZE;
+        GroupMemoryBarrierWithGroupSync();
     }
-    GroupMemoryBarrierWithGroupSync();
 
     if (is_inside) {
         int pix_id = pix_coord.y*W+pix_coord.x;
         n_contributors[pix_id] = local_n_contrib;
         final_pixel_state[pix_id] = curr_pixel_state;
-        final_pixel_depth[pix_id] = median_depth;
+        if (uniforms.expected_far > 0.0f) {
+            // Alpha-weighted (expected) depth: Sum(alpha_i*T_i*depth_i) / Sum(alpha_i*T_i),
+            // over contributors within the far bound. Defined wherever any opacity
+            // accumulates, so it has no median holes. The denominator is accumulated
+            // alongside the numerator (not derived from the final transmittance) so the
+            // two stay consistent on the saturating-splat break path, where
+            // curr_pixel_state is not updated before the loop exits.
+            final_pixel_depth[pix_id] =
+                weighted_alpha > 1.0e-4f ? (weighted_depth / weighted_alpha) : FAR_DEPTH;
+        } else {
+            final_pixel_depth[pix_id] = median_depth;
+        }
     }
 }
 

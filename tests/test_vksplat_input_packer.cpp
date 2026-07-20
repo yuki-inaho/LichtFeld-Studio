@@ -15,6 +15,7 @@
 #include "core/tensor.hpp"
 #include "rendering/rasterizer/vulkan/src/buffer.h"
 #include "rendering/rasterizer/vulkan/src/config.h"
+#include "rendering/rasterizer/vulkan/src/indirect_layout.h"
 #include "visualizer/rendering/vksplat_input_packer.hpp"
 
 #include <gtest/gtest.h>
@@ -24,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 using lfs::core::DataType;
@@ -39,6 +41,15 @@ using lfs::vis::vksplat::packHostInputs;
 using lfs::vis::vksplat::rawDeviceInputLayout;
 
 namespace {
+
+    template <typename Handle>
+    [[nodiscard]] Handle fakeVkHandle(const std::uintptr_t value) {
+        if constexpr (std::is_pointer_v<Handle>) {
+            return reinterpret_cast<Handle>(value);
+        } else {
+            return static_cast<Handle>(value);
+        }
+    }
 
     [[nodiscard]] float sigmoidf(float x) {
         return 1.0f / (1.0f + std::exp(-x));
@@ -217,6 +228,60 @@ namespace {
     }
 
 } // namespace
+
+TEST(VkSplatIndirectLayoutTest, SharedWordCountsAndOffsetsMatchEveryProducerContract) {
+    namespace indirect = lfs::rendering::vulkan::indirect_layout;
+
+    EXPECT_EQ(indirect::kCommandWordCount, 3u);
+    EXPECT_EQ(sizeof(VkDispatchIndirectCommand),
+              indirect::kCommandWordCount * sizeof(std::uint32_t));
+
+    EXPECT_EQ(indirect::VisibleSortDispatch::kLayout.word_count, 3u);
+    EXPECT_EQ(indirect::VisibleSortDispatch::kRadixWordOffset, 0u);
+
+    EXPECT_EQ(indirect::TileSortDispatch::kLayout.word_count, 6u);
+    EXPECT_EQ(indirect::TileSortDispatch::kRadixWordOffset, 0u);
+    EXPECT_EQ(indirect::TileSortDispatch::kRangeWordOffset, 3u);
+
+    EXPECT_EQ(indirect::TileBatchDispatch::kLayout.word_count, 3u);
+    EXPECT_EQ(indirect::TileBatchDispatch::kRasterWordOffset, 0u);
+
+    EXPECT_EQ(indirect::VisibleChainDispatch::kLayout.word_count, 12u);
+    EXPECT_EQ(indirect::VisibleChainDispatch::kRadixWordOffset, 0u);
+    EXPECT_EQ(indirect::VisibleChainDispatch::kPerElementWordOffset, 3u);
+    EXPECT_EQ(indirect::VisibleChainDispatch::kCumsumLevel0WordOffset, 6u);
+    EXPECT_EQ(indirect::VisibleChainDispatch::kCumsumLevel1WordOffset, 9u);
+
+    EXPECT_EQ(indirect::SurvivorState::kLayout.word_count, 4u);
+    EXPECT_EQ(indirect::SurvivorState::kCountWordOffset, 0u);
+    EXPECT_EQ(indirect::SurvivorState::kProjectionWordOffset, 1u);
+
+    EXPECT_EQ(indirect::MacroWaveDispatch::kLayout.word_count, 96u);
+    EXPECT_EQ(indirect::MacroWaveDispatch::kWaveStrideWords, 3u);
+    EXPECT_EQ(indirect::MacroWaveDispatch::kRasterBaseWordOffset, 0u);
+    EXPECT_EQ(indirect::MacroWaveDispatch::kComposeBaseWordOffset, 48u);
+    EXPECT_EQ(indirect::MacroWaveDispatch::rasterWordOffset(HIGS_RASTER_MAX_WAVES - 1u), 45u);
+    EXPECT_EQ(indirect::MacroWaveDispatch::composeWordOffset(HIGS_RASTER_MAX_WAVES - 1u), 93u);
+}
+
+TEST(VulkanBufferViewTest, SharedScratchViewSeparatesBackingSizeFromRegionCapacity) {
+    _VulkanBuffer view{};
+    view.buffer = fakeVkHandle<VkBuffer>(1);
+    view.allocSize = 384u << 20u;
+    view.offset = 66'000'384u;
+    view.capacity = 18'000'000u;
+    view.size = 651'300u;
+
+    ASSERT_TRUE(view.hasValidViewBounds());
+    EXPECT_TRUE(view.containsRange(0, view.size));
+    EXPECT_TRUE(view.containsRange(view.capacity - 1, 1));
+    EXPECT_FALSE(view.containsRange(view.capacity, 1));
+    EXPECT_FALSE(view.containsRange(0, view.capacity + 1));
+
+    view.offset = view.allocSize - view.capacity + 1;
+    EXPECT_FALSE(view.hasValidViewBounds());
+    EXPECT_FALSE(view.containsRange(0, view.size));
+}
 
 class VksplatInputPackerTest : public ::testing::TestWithParam<std::tuple<std::size_t, int>> {};
 
@@ -462,4 +527,55 @@ TEST(VksplatInputPackerTest, RawOpacityCopyBakesDeletedMaskOnlyIntoOpacity) {
             EXPECT_FLOAT_EQ(masked_values[i], in.opacity[i]);
         }
     }
+}
+
+TEST(VksplatInputPackerTest, SoftDeleteAndUndeleteKeepDeletedMaskStorageStable) {
+    constexpr std::size_t n = 5;
+    SyntheticInputs in = makeInputs(n, /*max_sh_degree=*/1, /*seed=*/0x51AFu);
+    auto splat = buildSplatData(in);
+    const std::uint64_t initial_version = splat->deleted_mask_version();
+
+    const auto first_mask = Tensor::from_vector(
+                                std::vector<int>{0, 1, 0, 0, 0},
+                                {n},
+                                Device::CUDA)
+                                .to(DataType::Bool);
+    const Tensor first_newly_deleted = splat->soft_delete(first_mask);
+
+    ASSERT_TRUE(splat->has_deleted_mask());
+    const void* const deleted_ptr = splat->deleted().data_ptr();
+    ASSERT_NE(deleted_ptr, nullptr);
+    EXPECT_GT(splat->deleted_mask_version(), initial_version);
+    const std::uint64_t first_version = splat->deleted_mask_version();
+    EXPECT_EQ(first_newly_deleted.cpu().to_vector_bool(),
+              (std::vector<bool>{false, true, false, false, false}));
+    EXPECT_EQ(splat->deleted().cpu().to_vector_bool(),
+              (std::vector<bool>{false, true, false, false, false}));
+
+    const auto second_mask = Tensor::from_vector(
+                                 std::vector<int>{0, 1, 1, 0, 1},
+                                 {n},
+                                 Device::CUDA)
+                                 .to(DataType::Bool);
+    const Tensor second_newly_deleted = splat->soft_delete(second_mask);
+
+    EXPECT_EQ(splat->deleted().data_ptr(), deleted_ptr);
+    EXPECT_GT(splat->deleted_mask_version(), first_version);
+    const std::uint64_t second_version = splat->deleted_mask_version();
+    EXPECT_EQ(second_newly_deleted.cpu().to_vector_bool(),
+              (std::vector<bool>{false, false, true, false, true}));
+    EXPECT_EQ(splat->deleted().cpu().to_vector_bool(),
+              (std::vector<bool>{false, true, true, false, true}));
+
+    const auto undelete_mask = Tensor::from_vector(
+                                   std::vector<int>{0, 1, 0, 0, 1},
+                                   {n},
+                                   Device::CUDA)
+                                   .to(DataType::Bool);
+    splat->undelete(undelete_mask);
+
+    EXPECT_EQ(splat->deleted().data_ptr(), deleted_ptr);
+    EXPECT_GT(splat->deleted_mask_version(), second_version);
+    EXPECT_EQ(splat->deleted().cpu().to_vector_bool(),
+              (std::vector<bool>{false, false, true, false, false}));
 }

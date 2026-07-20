@@ -212,12 +212,30 @@ namespace lfs::mcp {
                 return std::unexpected(locked_groups.error());
             }
 
+            const uint8_t group_id = scene.getActiveSelectionGroup();
             const auto existing_mask = scene.getSelectionMask();
             const core::Tensor empty_mask;
-            const auto& existing_ref = (existing_mask && existing_mask->is_valid()) ? *existing_mask : empty_mask;
+            const core::Tensor* const existing_ptr =
+                (existing_mask && existing_mask->is_valid() && existing_mask->numel() == selection_mask.numel())
+                    ? existing_mask.get()
+                    : nullptr;
+            if (mode == "intersect") {
+                if (existing_ptr) {
+                    auto active_group = existing_ptr->eq(group_id);
+                    if (active_group.device() != core::Device::CUDA) {
+                        active_group = active_group.cuda();
+                    }
+                    selection_mask = selection_mask.logical_and(active_group);
+                } else {
+                    selection_mask =
+                        core::Tensor::zeros({selection_mask.numel()}, core::Device::CUDA, core::DataType::Bool);
+                }
+            }
+
+            const auto& existing_ref = existing_ptr ? *existing_ptr : empty_mask;
             const auto transform_indices = scene.getTransformIndices();
             const bool add_mode = (mode != "remove");
-            const bool replace_mode = (mode == "replace");
+            const bool replace_mode = (mode == "replace" || mode == "intersect");
             auto& output_mask = acquire_selection_output_buffer(
                 selection_output_buffers, selection_output_buffer_index, selection_mask.numel());
 
@@ -225,7 +243,7 @@ namespace lfs::mcp {
                 selection_mask,
                 existing_ref,
                 output_mask,
-                scene.getActiveSelectionGroup(),
+                group_id,
                 *locked_groups,
                 add_mode,
                 transform_indices.get(),
@@ -390,17 +408,34 @@ namespace lfs::mcp {
             return std::unexpected("No trainer initialized");
         }
 
-        if (training_thread_) {
+        if (training_thread_ && training_active_.load(std::memory_order_acquire)) {
             return std::unexpected("Training already running");
         }
 
+        // A naturally completed jthread remains joinable until its owner reaps
+        // it. Join that finished generation before installing the next one.
+        training_thread_.reset();
+
         auto trainer = trainer_;
-        training_thread_ = std::make_unique<std::jthread>([trainer](std::stop_token stop) {
-            auto result = trainer->train(stop);
-            if (!result) {
-                LOG_ERROR("Training error: {}", result.error());
-            }
-        });
+        training_active_.store(true, std::memory_order_release);
+        try {
+            training_thread_ = std::make_unique<std::jthread>([this, trainer](std::stop_token stop) {
+                try {
+                    auto result = trainer->train(stop);
+                    if (!result) {
+                        LOG_ERROR("Training error: {}", result.error());
+                    }
+                } catch (const std::exception& e) {
+                    LOG_ERROR("MCP training worker failed: {}", e.what());
+                } catch (...) {
+                    LOG_ERROR("MCP training worker failed with an unknown exception");
+                }
+                training_active_.store(false, std::memory_order_release);
+            });
+        } catch (const std::exception& e) {
+            training_active_.store(false, std::memory_order_release);
+            return std::unexpected(std::string("Failed to start training thread: ") + e.what());
+        }
 
         LOG_INFO("MCP: Training started");
         return {};
@@ -416,6 +451,7 @@ namespace lfs::mcp {
             training_thread_->request_stop();
             training_thread_.reset();
         }
+        training_active_.store(false, std::memory_order_release);
     }
 
     void TrainingContext::pause_training() {
@@ -582,7 +618,7 @@ namespace lfs::mcp {
                         {"x", json{{"type", "number"}, {"description", "X coordinate"}}},
                         {"y", json{{"type", "number"}, {"description", "Y coordinate"}}},
                         {"camera_index", json{{"type", "integer"}, {"description", "Camera index (default: 0)"}}},
-                        {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove"})}, {"description", "Selection mode (default: replace)"}}}},
+                        {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"x", "y"}}},
             [](const json& args) -> json {
                 auto& ctx = TrainingContext::instance();

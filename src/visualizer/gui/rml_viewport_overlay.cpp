@@ -61,6 +61,15 @@ namespace lfs::vis::gui {
             return isInteractiveViewportOverlayElement(element) ? element : nullptr;
         }
 
+        [[nodiscard]] bool isElementOrDescendantOf(const Rml::Element* element,
+                                                   const Rml::Element* ancestor) {
+            for (auto* node = element; node; node = node->GetParentNode()) {
+                if (node == ancestor)
+                    return true;
+            }
+            return false;
+        }
+
     } // namespace
 
     RmlViewportOverlay::RmlViewportOverlay()
@@ -297,6 +306,14 @@ namespace lfs::vis::gui {
         screen_origin_ = screen_origin;
     }
 
+    void RmlViewportOverlay::setViewportContentOffset(const float x) {
+        if (std::abs(viewport_content_offset_ - x) > 0.5f) {
+            viewport_content_offset_ = x;
+            viewport_content_offset_dirty_ = true;
+            markRenderNeeded(RenderReason::ViewportResize);
+        }
+    }
+
     void RmlViewportOverlay::setToolbarPanels(const float primary_x,
                                               const float primary_width,
                                               const bool show_secondary,
@@ -392,10 +409,6 @@ namespace lfs::vis::gui {
             markRenderNeeded(RenderReason::VramHud);
     }
 
-    bool RmlViewportOverlay::isDueForVramProcessSample(std::chrono::milliseconds interval) {
-        return vram_hud_ ? vram_hud_->isDueForProcessSample(interval) : false;
-    }
-
     void RmlViewportOverlay::bindReactiveStore() {
         auto& store = lfs::vis::app_store();
         gt_metrics_config_ = store.gt_metrics_overlay_config.get();
@@ -439,6 +452,7 @@ namespace lfs::vis::gui {
         document_sync_subscriptions_.push_back(store.active_submode.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.transform_space.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.pivot_mode.subscribe(mark_document_dirty));
+        document_sync_subscriptions_.push_back(store.multi_transform_mode.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.render_settings_generation.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.viewport_toolbar_generation.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.import_overlay_state.subscribe(mark_document_dirty));
@@ -495,6 +509,12 @@ namespace lfs::vis::gui {
                    secondary_toolbar_x_,
                    secondary_toolbar_width_,
                    show_secondary_toolbar_ && secondary_toolbar_width_ > 0.0f);
+        const auto apply_left_toolbar_offset = [&](const char* element_id, const float x) {
+            if (auto* const element = document_->GetElementById(element_id)) {
+                element->SetProperty("left", std::format("{:.1f}px", x));
+            }
+        };
+        apply_left_toolbar_offset("primary-utility-toolbar", -primary_toolbar_x_);
         applied_primary_toolbar_x_ = primary_toolbar_x_;
         applied_primary_toolbar_width_ = primary_toolbar_width_;
         applied_show_secondary_toolbar_ = show_secondary_toolbar_;
@@ -502,6 +522,15 @@ namespace lfs::vis::gui {
         applied_secondary_toolbar_width_ = secondary_toolbar_width_;
         toolbar_roots_dirty_ = false;
         return true;
+    }
+
+    void RmlViewportOverlay::updateViewportContentOffset() {
+        if (!document_ || !viewport_content_offset_dirty_)
+            return;
+        if (auto* const element = document_->GetElementById("viewport-content")) {
+            element->SetProperty("left", std::format("{:.1f}px", viewport_content_offset_));
+        }
+        viewport_content_offset_dirty_ = false;
     }
 
     void RmlViewportOverlay::applySplitDividerOverlay() {
@@ -618,9 +647,12 @@ namespace lfs::vis::gui {
                                rml_my >= 0 && rml_my < static_cast<int>(vp_size_.y);
         const bool mouse_moved =
             !mouse_pos_valid_ || rml_mx != last_mouse_x_ || rml_my != last_mouse_y_;
+        const bool mouse_clicked =
+            input.mouse_clicked[0] || input.mouse_clicked[1] || input.mouse_clicked[2];
         const bool pointer_event =
             input.mouse_clicked[0] || input.mouse_released[0] ||
             input.mouse_clicked[1] || input.mouse_released[1] ||
+            input.mouse_clicked[2] || input.mouse_released[2] ||
             input.mouse_wheel != 0.0f;
         const bool pointer_drag =
             input.mouse_down[0] || input.mouse_down[1] || input.mouse_down[2];
@@ -657,6 +689,13 @@ namespace lfs::vis::gui {
                                         : nullptr;
         const bool point_interactive = viewportOverlayHoverRoot(point_element) != nullptr;
         const bool hover_target_changed = point_element != last_hover_element_;
+        if (focused_text_target &&
+            mouse_clicked &&
+            is_inside &&
+            !isElementOrDescendantOf(point_element, focused_before)) {
+            focused_before->Blur();
+            markRenderNeeded(RenderReason::Keyboard);
+        }
         if (external_mouse_capture && !point_interactive && !hovered_interactive_ &&
             !vram_drag_capture) {
             tooltip_.setHover({}, nullptr);
@@ -683,7 +722,8 @@ namespace lfs::vis::gui {
                 if (input.mouse_wheel != 0.0f)
                     markRenderNeeded(RenderReason::PointerWheel);
                 if (input.mouse_clicked[0] || input.mouse_released[0] ||
-                    input.mouse_clicked[1] || input.mouse_released[1])
+                    input.mouse_clicked[1] || input.mouse_released[1] ||
+                    input.mouse_clicked[2] || input.mouse_released[2])
                     markRenderNeeded(RenderReason::PointerButton);
                 if (pointer_drag || vram_drag_capture)
                     markRenderNeeded(RenderReason::PointerDrag);
@@ -877,7 +917,7 @@ namespace lfs::vis::gui {
             .draw_width = vp_size_.x,
             .draw_height = vp_size_.y,
             .refresh = refresh_cache,
-            .foreground = true,
+            .foreground = false,
             .clip_enabled = true,
             .clip = {
                 .x1 = x,
@@ -905,8 +945,10 @@ namespace lfs::vis::gui {
             LOG_TIMER_THRESHOLD("gui_render.rml_viewport_overlay.render.tooltip", 0.25);
             tooltip_changed = applyFrameTooltip();
         }
-        if (rml_manager_)
+        if (rml_manager_) {
             rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.needsFrame());
+            rml_manager_->setContextTooltipRevealDeadline(rml_context_, tooltip_.revealDeadline());
+        }
         const bool can_update_tooltip_only =
             rml_manager_ && tooltip_changed && theme_current && !document_hooks_due &&
             !builtin_document_sync_due && !render_needed_ && !animation_active_ &&
@@ -955,6 +997,7 @@ namespace lfs::vis::gui {
         const int h = static_cast<int>(vp_size_.y);
         const bool size_changed = (w != last_render_w_ || h != last_render_h_);
         const bool toolbar_changed = updateToolbarRoots();
+        updateViewportContentOffset();
         const bool document_force = theme_changed || size_changed || toolbar_changed;
         bool document_dirty = syncBuiltinDocument(document_force);
         const bool run_prepend_document_hooks = shouldRunDocumentHooks(document_force, true);
@@ -989,8 +1032,10 @@ namespace lfs::vis::gui {
             LOG_TIMER_THRESHOLD("gui_render.rml_viewport_overlay.render.tooltip", 0.25);
             tooltip_changed = applyFrameTooltip();
         }
-        if (rml_manager_)
+        if (rml_manager_) {
             rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.needsFrame());
+            rml_manager_->setContextTooltipRevealDeadline(rml_context_, tooltip_.revealDeadline());
+        }
 
         const bool needs_render = render_needed_ || animation_active_ || document_dirty ||
                                   theme_changed || size_changed || toolbar_changed ||

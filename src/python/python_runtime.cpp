@@ -12,6 +12,7 @@
 #include <cassert>
 #include <chrono>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_set>
 
 #include "python_compat.hpp"
@@ -88,6 +89,10 @@ namespace lfs::python {
         // Transform space callbacks
         GetTransformSpaceCallback g_get_transform_space_cb = nullptr;
         SetTransformSpaceCallback g_set_transform_space_cb = nullptr;
+
+        // Multi-transform mode callbacks
+        GetMultiTransformModeCallback g_get_multi_transform_mode_cb = nullptr;
+        SetMultiTransformModeCallback g_set_multi_transform_mode_cb = nullptr;
 
         // Asset Manager save callback
         SaveAssetCallback g_save_asset_cb = nullptr;
@@ -180,6 +185,8 @@ namespace lfs::python {
         std::atomic<uint64_t> g_redraw_generation{0};
         std::atomic<uint64_t> g_pre_scene_panel_sync_generation{0};
         MainLoopWakeCallback g_main_loop_wake_callback = nullptr;
+        std::mutex g_startup_plugin_load_status_mutex;
+        StartupPluginLoadStatus g_startup_plugin_load_status;
     } // namespace
 
     // Bridge API
@@ -206,6 +213,9 @@ namespace lfs::python {
         }
         if (g_get_transform_space_cb) {
             g_frame_context.transform_space = g_get_transform_space_cb();
+        }
+        if (g_get_multi_transform_mode_cb) {
+            g_frame_context.multi_transform_mode = g_get_multi_transform_mode_cb();
         }
         g_frame_context.selection_submode = g_selection_submode.load();
     }
@@ -239,6 +249,21 @@ namespace lfs::python {
 
     void set_main_loop_wake_callback(MainLoopWakeCallback cb) {
         g_main_loop_wake_callback = cb;
+    }
+
+    void set_startup_plugin_load_status(const StartupPluginLoadStatus& status) {
+        {
+            std::lock_guard lock(g_startup_plugin_load_status_mutex);
+            const auto revision = g_startup_plugin_load_status.revision + 1;
+            g_startup_plugin_load_status = status;
+            g_startup_plugin_load_status.revision = revision;
+        }
+        request_redraw();
+    }
+
+    StartupPluginLoadStatus get_startup_plugin_load_status() {
+        std::lock_guard lock(g_startup_plugin_load_status_mutex);
+        return g_startup_plugin_load_status;
     }
 
     // Operation context (short-lived)
@@ -541,6 +566,20 @@ namespace lfs::python {
             g_set_transform_space_cb(space);
     }
 
+    void set_multi_transform_mode_callbacks(GetMultiTransformModeCallback get_cb, SetMultiTransformModeCallback set_cb) {
+        g_get_multi_transform_mode_cb = get_cb;
+        g_set_multi_transform_mode_cb = set_cb;
+    }
+
+    int get_multi_transform_mode() {
+        return g_get_multi_transform_mode_cb ? g_get_multi_transform_mode_cb() : 0;
+    }
+
+    void set_multi_transform_mode(int mode) {
+        if (g_set_multi_transform_mode_cb)
+            g_set_multi_transform_mode_cb(mode);
+    }
+
     void set_save_asset_callback(SaveAssetCallback save_cb) {
         g_save_asset_cb = save_cb;
     }
@@ -669,9 +708,18 @@ namespace lfs::python {
         g_max_texture_size_fn = max_size;
     }
 
+    void require_ui_texture_creation_thread() {
+        if (!on_graphics_thread()) {
+            throw std::runtime_error(
+                "UI texture creation must run on the graphics thread; defer icon or "
+                "image loading until a panel draw callback");
+        }
+    }
+
     TextureResult create_ui_texture(const unsigned char* data, const int w, const int h, const int channels) {
         if (!g_create_texture)
             return {0, w, h};
+        require_ui_texture_creation_thread();
         return g_create_texture(data, w, h, channels);
     }
 
@@ -948,7 +996,8 @@ namespace lfs::python {
 
     void invoke_export(int format, const std::string& path,
                        const std::vector<std::string>& node_names, int sh_degree,
-                       bool rad_flip_y) {
+                       bool rad_flip_y,
+                       bool rad_streamable) {
         if (!g_export_callback)
             return;
 
@@ -959,7 +1008,8 @@ namespace lfs::python {
         }
         g_export_callback(format, path.c_str(), names_ptrs.data(),
                           static_cast<int>(names_ptrs.size()), sh_degree,
-                          rad_flip_y);
+                          rad_flip_y,
+                          rad_streamable);
     }
 
     bool has_python_toolbar() {

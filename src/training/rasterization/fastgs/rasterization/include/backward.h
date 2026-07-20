@@ -7,6 +7,7 @@
 #include "fused_adam_types.h"
 #include "helper_math.h"
 #include "rasterization_config.h"
+#include <cuda_runtime.h>
 #include <functional>
 
 namespace fast_lfs::rasterization {
@@ -16,6 +17,7 @@ namespace fast_lfs::rasterization {
         const float* grad_image,
         const float* grad_alpha,
         const float* grad_depth,
+        const float* grad_normal, // [3*H*W] or nullptr
         const float* image,
         const float* alpha,
         const float3* means,
@@ -25,6 +27,7 @@ namespace fast_lfs::rasterization {
         const float4* sh_coefficients_rest, // compact float4-packed swizzled layout
         const float4* w2c,
         const float3* cam_position,
+        const float3* primitive_normals, // [N] or nullptr, required when grad_normal != nullptr
         char* per_primitive_buffers_blob,
         char* per_tile_buffers_blob,
         const uint* sorted_primitive_indices,
@@ -33,6 +36,7 @@ namespace fast_lfs::rasterization {
         float2* grad_mean2d_helper,
         float* grad_conic_helper,
         float* grad_depth_helper,
+        float3* grad_normal_helper, // [N] or nullptr, required when grad_normal != nullptr
         float4* grad_w2c,
         float* densification_info,
         const int n_primitives,
@@ -46,8 +50,8 @@ namespace fast_lfs::rasterization {
         const float cx,
         const float cy,
         bool mip_filter,
-        DensificationType densification_type = DensificationType::None,
-        FusedAdamSettings fused_adam = {},
-        bool detach_depth_weights = false);
+        DensificationType densification_type,
+        FusedAdamSettings fused_adam,
+        cudaStream_t stream);
 
 }

@@ -183,6 +183,12 @@ class _DocumentStub:
     def get_element_by_id(self, element_id):
         return self.elements.get(element_id)
 
+    def add_event_listener(self, event_name, callback):
+        pass
+
+    def query_selector_all(self, selector):
+        return []
+
 
 def _install_timer_stub(module, monkeypatch):
     timers = []
@@ -231,13 +237,13 @@ def test_toolbar_binds_overlay_model_fields(toolbar_module):
     module.reset_overlay_state()
     module.bind_overlay_model(model)
 
-    assert "show_render_controls" in model.bound_funcs
     assert "camera_flyout_open" not in model.bound_funcs
     assert "render_flyout_open" not in model.bound_funcs
     assert "selection_flyout_open" not in model.bound_funcs
     assert "transform_flyout_open" not in model.bound_funcs
     assert "selection_group_buttons" in model.bound_record_lists
     assert "selection_mode_buttons" in model.bound_record_lists
+    assert "selection_volume_gizmo_buttons" in model.bound_record_lists
     assert "transform_group_buttons" in model.bound_record_lists
     assert "transform_tool_buttons" in model.bound_record_lists
     assert "mirror_group_buttons" in model.bound_record_lists
@@ -246,12 +252,11 @@ def test_toolbar_binds_overlay_model_fields(toolbar_module):
     assert "crop_transform_buttons" in model.bound_record_lists
     assert "crop_action_buttons" in model.bound_record_lists
     assert "utility_primary_buttons" in model.bound_record_lists
-    assert "render_group_buttons" in model.bound_record_lists
     assert "camera_mode_buttons" in model.bound_record_lists
-    assert "render_mode_buttons" in model.bound_record_lists
     assert "show_transform_space_controls" in model.bound_funcs
     assert "show_transform_pivot_controls" in model.bound_funcs
     assert "show_crop_toolbar" in model.bound_funcs
+    assert "show_selection_volume_gizmos" in model.bound_funcs
     assert "toolbar_action" in model.bound_events
     assert "selection_tool_label" not in model.bound_funcs
     assert "selection_mode_label" not in model.bound_funcs
@@ -409,7 +414,7 @@ def test_selection_tool_uses_centered_modes(toolbar_module, monkeypatch):
 def test_transform_and_mirror_tools_use_centered_subtool_rows(toolbar_module, monkeypatch):
     module, _hook_calls, _remove_calls = toolbar_module
     lf_stub = sys.modules["lichtfeld"]
-    state = SimpleNamespace(active_tool="", transform_space=1, pivot_mode=0, mirror_calls=[])
+    state = SimpleNamespace(active_tool="", transform_space=1, multi_transform_mode=0, pivot_mode=0, mirror_calls=[])
 
     transform_submodes = (
         SimpleNamespace(id="local", label="Local", icon="local", shortcut=""),
@@ -467,6 +472,8 @@ def test_transform_and_mirror_tools_use_centered_subtool_rows(toolbar_module, mo
     monkeypatch.setattr(lf_stub.ui, "get_active_submode", lambda: "", raising=False)
     monkeypatch.setattr(lf_stub.ui, "get_transform_space", lambda: state.transform_space, raising=False)
     monkeypatch.setattr(lf_stub.ui, "set_transform_space", lambda value: setattr(state, "transform_space", value), raising=False)
+    monkeypatch.setattr(lf_stub.ui, "get_multi_transform_mode", lambda: state.multi_transform_mode, raising=False)
+    monkeypatch.setattr(lf_stub.ui, "set_multi_transform_mode", lambda value: setattr(state, "multi_transform_mode", value), raising=False)
     monkeypatch.setattr(lf_stub.ui, "get_pivot_mode", lambda: state.pivot_mode, raising=False)
     monkeypatch.setattr(lf_stub.ui, "set_pivot_mode", lambda value: setattr(state, "pivot_mode", value), raising=False)
     monkeypatch.setattr(lf_stub.ui, "execute_mirror", lambda axis: state.mirror_calls.append(axis), raising=False)
@@ -521,6 +528,7 @@ def test_transform_and_mirror_tools_use_centered_subtool_rows(toolbar_module, mo
     snapshot = controller.snapshot()
     assert snapshot["show_transform_toolbar"] is False
     assert next(button for button in snapshot["transform_tool_buttons"] if button["value"] == "builtin.translate")["selected"] is True
+    assert [button["value"] for button in snapshot["submode_buttons"]] == ["local", "world"]
 
     controller.dispatch("submode", "local")
     controller.dispatch("pivot", "bounds")
@@ -530,6 +538,25 @@ def test_transform_and_mirror_tools_use_centered_subtool_rows(toolbar_module, mo
     assert state.pivot_mode == 1
     assert next(button for button in snapshot["submode_buttons"] if button["value"] == "local")["selected"] is True
     assert next(button for button in snapshot["pivot_buttons"] if button["value"] == "bounds")["selected"] is True
+
+    monkeypatch.setattr(lf_stub, "get_selected_node_names", lambda: ["left", "right"], raising=False)
+    snapshot = controller.snapshot()
+
+    assert snapshot["show_transform_space_controls"] is True
+    assert [button["value"] for button in snapshot["submode_buttons"]] == ["selection", "individual"]
+    assert next(button for button in snapshot["submode_buttons"] if button["value"] == "selection")["selected"] is True
+    assert next(button for button in snapshot["submode_buttons"] if button["value"] == "selection")["tooltip_key"] == "toolbar.selection_transform"
+    assert next(button for button in snapshot["submode_buttons"] if button["value"] == "individual")["tooltip_key"] == "toolbar.individual_transform"
+
+    controller.dispatch("submode", "individual")
+    snapshot = controller.snapshot()
+
+    assert state.multi_transform_mode == 1
+    assert next(button for button in snapshot["submode_buttons"] if button["value"] == "individual")["selected"] is True
+
+    monkeypatch.setattr(lf_stub, "get_selected_node_names", lambda: ["target"], raising=False)
+    snapshot = controller.snapshot()
+    assert [button["value"] for button in snapshot["submode_buttons"]] == ["local", "world"]
 
     controller.dispatch("tool", "builtin.translate")
     snapshot = controller.snapshot()
@@ -646,6 +673,79 @@ def test_crop_tool_uses_centered_object_and_transform_rows(toolbar_module, monke
     assert state.calls[-1] == ("apply_crop_tool",)
 
 
+def test_selection_volume_modes_show_inline_gizmo_controls(toolbar_module, monkeypatch):
+    module, _hook_calls, _remove_calls = toolbar_module
+    lf_stub = sys.modules["lichtfeld"]
+    state = SimpleNamespace(
+        active_tool="builtin.select",
+        active_submode="box",
+        crop_operation="rotate",
+        calls=[],
+    )
+    select_tool = SimpleNamespace(
+        id="builtin.select",
+        icon="selection",
+        label="Select",
+        shortcut="1",
+        submodes=(
+            SimpleNamespace(id="centers", label="Centers", icon="circle-dot", shortcut=""),
+            SimpleNamespace(id="color", label="Color", icon="color-picker", shortcut=""),
+            SimpleNamespace(id="box", label="Box", icon="box", shortcut=""),
+            SimpleNamespace(id="sphere", label="Sphere", icon="sphere", shortcut=""),
+        ),
+        pivot_modes=(),
+        selected=None,
+        can_activate=lambda _context: True,
+    )
+
+    monkeypatch.setattr(lf_stub.ui, "get_active_tool", lambda: state.active_tool, raising=False)
+    monkeypatch.setattr(lf_stub.ui, "get_active_submode", lambda: state.active_submode, raising=False)
+    monkeypatch.setattr(lf_stub.ui, "set_selection_mode", lambda mode: setattr(state, "active_submode", mode), raising=False)
+    monkeypatch.setattr(lf_stub.ui, "get_crop_tool_operation", lambda: state.crop_operation, raising=False)
+    monkeypatch.setattr(
+        lf_stub.ui,
+        "set_crop_tool_operation",
+        lambda operation: (
+            state.calls.append(("set_crop_tool_operation", operation)),
+            setattr(state, "crop_operation", operation),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(module.ToolRegistry, "get_all", staticmethod(lambda: [select_tool]), raising=False)
+    monkeypatch.setattr(
+        module.ToolRegistry,
+        "get",
+        staticmethod(lambda tool_id: select_tool if tool_id == "builtin.select" else None),
+        raising=False,
+    )
+
+    controller = module._GizmoToolbarController()
+    snapshot = controller.snapshot()
+
+    assert snapshot["show_crop_toolbar"] is False
+    assert snapshot["show_selection_volume_gizmos"] is True
+    assert snapshot["crop_object_buttons"] == []
+    assert snapshot["crop_transform_buttons"] == []
+    assert snapshot["crop_action_buttons"] == []
+    assert [button["value"] for button in snapshot["selection_volume_gizmo_buttons"]] == [
+        "translate",
+        "rotate",
+        "scale",
+    ]
+    assert next(button for button in snapshot["selection_volume_gizmo_buttons"] if button["value"] == "rotate")["selected"] is True
+
+    controller.dispatch("crop_transform", "translate")
+
+    assert state.calls[-1] == ("set_crop_tool_operation", "translate")
+    snapshot = controller.snapshot()
+    assert next(button for button in snapshot["selection_volume_gizmo_buttons"] if button["value"] == "translate")["selected"] is True
+
+    state.active_submode = "color"
+    snapshot = controller.snapshot()
+    assert snapshot["show_selection_volume_gizmos"] is False
+    assert snapshot["selection_volume_gizmo_buttons"] == []
+
+
 def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_centered():
     project_root = Path(__file__).parent.parent.parent
     rml_path = (
@@ -689,12 +789,12 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     transform_toolbar_tooltip_keys = (
         "local_space",
         "world_space",
+        "selection_transform",
+        "individual_transform",
         "origin_pivot",
         "bounds_center_pivot",
     )
-    utility_toolbar_tooltip_keys = (
-        "asset_manager",
-    )
+    utility_toolbar_tooltip_keys = ()
     selection_tooltip_keys = (
         "selection_panel",
         "selection_depth_range",
@@ -717,6 +817,8 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert "secondary-pivot-toolbar" not in rml
     assert "toolbar-context-stack" not in rml
     assert rml.count('data-for="button : gizmo_buttons"') == 2
+    assert rml.count('data-for="button : camera_mode_buttons"') == 0
+    assert rml.count('data-for="button : utility_primary_buttons"') == 2
     assert rml.count('data-for="button : submode_buttons"') == 3
     assert rml.count('data-for="button : pivot_buttons"') == 1
     assert rml.count('data-for="button : mirror_group_buttons"') == 2
@@ -724,15 +826,32 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert rml.count('data-for="button : crop_object_buttons"') == 2
     assert rml.count('data-for="button : crop_transform_buttons"') == 2
     assert rml.count('data-for="button : crop_action_buttons"') == 2
+    assert rml.count('data-for="button : selection_volume_gizmo_buttons"') == 1
     assert 'class="toolbar-flyout-divider hidden"' not in rml
     assert "toolbar-flyout" not in rml
     assert rml.count('data-for="button : selection_group_buttons"') == 2
-    assert rml.count('class="toolbar-separator"') == 10
-    assert rml.count('class="toolbar-separator" data-if="show_render_controls"') == 2
-    assert rml.count('data-attr-data-shortcut="button.shortcut_text"') == 26
+    assert rml.count('class="toolbar-separator"') == 6
+    assert 'class="toolbar-separator hidden"' in rml
+    assert rml.count('class="viewport-gizmo-controls"') == 2
+    assert rml.count('class="viewport-gizmo-control-row"') == 2
+    assert 'id="primary-viewport-gizmo-controls" class="viewport-gizmo-controls"' in rml
+    assert 'id="secondary-viewport-gizmo-controls" class="viewport-gizmo-controls"' in rml
+    assert "viewport-nav-toolbar" not in rml
+    assert "viewport-nav-separator" not in rml
+    primary_left = rml[
+        rml.index('id="primary-utility-toolbar"') : rml.index('id="primary-viewport-gizmo-controls"')
+    ]
+    secondary_left = rml[
+        rml.index('id="secondary-utility-toolbar"') : rml.index('id="secondary-viewport-gizmo-controls"')
+    ]
+    for toolbar_markup in (primary_left, secondary_left):
+        assert 'data-for="button : camera_mode_buttons"' not in toolbar_markup
+        assert 'data-for="button : utility_primary_buttons"' not in toolbar_markup
+    assert rml.count('data-attr-data-shortcut="button.shortcut_text"') == 25
     assert "data-attr-data-tooltip" not in rml
     assert 'data-attr-title="button.tooltip_text"' in rml
     assert rml.count('data-for="button : selection_mode_buttons"') == 1
+    assert 'data-class-hidden="!show_selection_volume_gizmos"' in rml
     assert rml.count('data-for="button : transform_group_buttons"') == 2
     assert rml.count('data-for="button : transform_tool_buttons"') == 3
     assert 'id="selection-block"' in rml
@@ -793,7 +912,6 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
             "home",
             "fullscreen",
             "toggle_ui",
-            "asset_manager",
         )
         forbidden_shortcut_fragments = (
             "(1)",
@@ -849,8 +967,7 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert '<span class="flyout-corner-marker"></span>' not in rml
     assert "dropdown-arrow.png" not in rml
     assert "flyout_open" not in rml
-    assert 'data-for="button : camera_mode_buttons"' in rml
-    assert 'data-for="button : render_mode_buttons"' in rml
+    assert 'data-for="button : render_mode_buttons"' not in rml
     assert 'data-class-selected="button.selected"' in rml
     assert "toolbar-flyout" not in rcss
     assert "toolbar-group-container" not in rcss
@@ -868,18 +985,31 @@ def test_viewport_overlay_template_moves_tools_left_and_transform_numbers_center
     assert "width: 64dp;" in rcss
     assert "width: 24dp;" in rcss
     assert ".toolbar-vertical .icon-btn {\n    position: relative;\n    display: flex;" in rcss
+    assert ".viewport-gizmo-controls {\n    position: absolute;\n    top: 108dp;\n    right: 10dp;" in rcss
+    assert "flex-direction: column;\n    align-items: center;\n    width: 95dp;" in rcss
+    assert ".viewport-gizmo-control-row {\n    display: flex;\n    flex-direction: row;" in rcss
+    assert "justify-content: center;\n    width: 95dp;\n    gap: 3dp;" in rcss
+    assert ".viewport-gizmo-controls .icon-btn {\n    position: relative;\n    display: flex;" in rcss
+    gizmo_button_start = rcss.index(".viewport-gizmo-controls .icon-btn {")
+    gizmo_button_end = rcss.index(".viewport-gizmo-controls .icon-btn:hover")
+    gizmo_button_rcss = rcss[gizmo_button_start:gizmo_button_end]
+    assert "width: 30dp;\n    height: 30dp;\n    min-width: 30dp;\n    min-height: 30dp;" in gizmo_button_rcss
+    assert ".viewport-gizmo-controls .icon-btn img {\n    width: 20dp;\n    height: 20dp;" in rcss
+    assert "viewport-nav-toolbar" not in rcss
+    assert "viewport-nav-row" not in rcss
+    assert "viewport-nav-separator" not in rcss
     assert "width: 30dp;\n    height: 30dp;\n    min-width: 30dp;\n    min-height: 30dp;" in rcss
     assert ".toolbar-hcenter .toolbar-container {\n    align-items: center;\n    padding: 5dp 6dp;" in rcss
     assert ".toolbar-hcenter .icon-btn {\n    display: flex;" in rcss
-    assert "width: 22dp;\n    height: 22dp;\n    min-width: 22dp;\n    min-height: 22dp;" in rcss
-    assert ".toolbar-hcenter .icon-btn img {\n    width: 17dp;\n    height: 17dp;" in rcss
+    assert "width: 30dp;\n    height: 30dp;\n    min-width: 30dp;\n    min-height: 30dp;" in rcss
+    assert ".toolbar-hcenter .icon-btn img {\n    width: 20dp;\n    height: 20dp;" in rcss
     assert "margin: 8dp 0 7dp;" in rcss
     assert ".viewport-transform-overlay {\n    position: absolute;\n    top: 5dp;" in rcss
     assert ".viewport-selection-overlay {\n    position: absolute;\n    top: 5dp;" in rcss
     assert "#depth-view-block .viewport-depth-panel {\n    padding: 5dp 6dp;" in rcss
     assert "#depth-view-block .viewport-depth-mode-select {\n    height: 22dp;" in rcss
     assert "#depth-view-block .viewport-depth-axis {\n    height: 22dp;" in rcss
-    assert "#depth-view-block .viewport-selection-depth-axis > .number-input.viewport-depth-input {\n    height: 22dp;" in rcss
+    assert "#depth-view-block .viewport-depth-axis > .scrub-field {\n    width: 112dp;\n    min-width: 112dp;\n    height: 22dp;" in rcss
     assert ".toolbar-flyout-trigger.hidden" not in rcss
     assert ".viewport-transform-overlay" in rcss
     assert ".viewport-selection-overlay" in rcss
@@ -899,7 +1029,6 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     model = _DataModelStub()
     lf_stub = sys.modules["lichtfeld"]
     panel_enabled = {
-        "lfs.asset_manager": True,
         "lfs.input_settings": True,
         "lfs.plugin_marketplace": True,
     }
@@ -920,6 +1049,7 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     monkeypatch.setattr(lf_stub.ui, "context", lambda: SimpleNamespace(), raising=False)
     monkeypatch.setattr(lf_stub.ui, "get_active_tool", lambda: "", raising=False)
     monkeypatch.setattr(lf_stub.ui, "get_transform_space", lambda: 1, raising=False)
+    monkeypatch.setattr(lf_stub.ui, "get_multi_transform_mode", lambda: 0, raising=False)
     monkeypatch.setattr(lf_stub.ui, "get_pivot_mode", lambda: 0, raising=False)
     monkeypatch.setattr(lf_stub.ui, "get_split_view_mode", lambda: "single", raising=False)
     monkeypatch.setattr(lf_stub.ui, "is_sequencer_visible", lambda: False, raising=False)
@@ -928,7 +1058,6 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
         "tr",
         lambda key: {
             "toolbar.focus_selection": "Focus Selection",
-            "toolbar.asset_manager": "Assets",
             "menu.tools.plugin_marketplace": "Plugins",
             "window.input_settings": "Input",
             "toolbar.viewport_export": "Export",
@@ -959,20 +1088,23 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     camera_buttons = model.handle.record_updates["camera_mode_buttons"]
     primary_buttons = model.handle.record_updates["utility_primary_buttons"]
     extra_buttons = model.handle.record_updates["utility_extra_buttons"]
-    render_group = model.handle.record_updates["render_group_buttons"][0]
-    assert len(camera_buttons) == 3
+    assert len(camera_buttons) == 4
+    assert [button["value"] for button in camera_buttons] == [
+        "orbit",
+        "trackball",
+        "fpv",
+        "drone",
+    ]
+    assert camera_buttons[3]["icon_src"] == "../icon/drone.png"
     assert [button["action"] for button in primary_buttons] == [
         "home",
         "focus_selection",
-        "fullscreen",
-        "toggle_ui",
     ]
     assert primary_buttons[1]["icon_src"] == "../icon/focus-selection.png"
     assert primary_buttons[1]["tooltip_text"] == "Focus Selection"
     assert [button["button_id"] for button in extra_buttons] == [
         "util-input-settings",
         "util-viewport-export",
-        "util-asset-manager",
         "util-plugin-marketplace",
         "util-sequencer",
     ]
@@ -987,19 +1119,11 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     assert extra_by_id["util-viewport-export"]["icon_src"] == "../icon/sequencer/export.png"
     assert extra_by_id["util-viewport-export"]["tooltip_text"] == "Export"
     assert extra_by_id["util-viewport-export"]["selected"] is False
-    assert extra_by_id["util-asset-manager"]["action"] == "toggle_panel"
-    assert extra_by_id["util-asset-manager"]["value"] == "lfs.asset_manager"
-    assert extra_by_id["util-asset-manager"]["icon_src"] == "../icon/archive.png"
-    assert extra_by_id["util-asset-manager"]["tooltip_text"] == "Assets"
-    assert extra_by_id["util-asset-manager"]["selected"] is True
     assert extra_by_id["util-plugin-marketplace"]["action"] == "toggle_panel"
     assert extra_by_id["util-plugin-marketplace"]["value"] == "lfs.plugin_marketplace"
     assert extra_by_id["util-plugin-marketplace"]["icon_src"] == "../icon/puzzle.png"
     assert extra_by_id["util-plugin-marketplace"]["tooltip_text"] == "Plugins"
     assert extra_by_id["util-plugin-marketplace"]["selected"] is True
-    assert render_group["action"] == "render_group"
-    assert render_group["icon_src"] == "../icon/blob.png"
-    assert render_group["selected"] is False
 
     model.handle.record_updates.clear()
     model.bound_events["toolbar_action"](None, None, ["toggle_panel", "lfs.plugin_marketplace"])

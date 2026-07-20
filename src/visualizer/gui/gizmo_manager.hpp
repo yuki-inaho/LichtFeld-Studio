@@ -11,9 +11,12 @@
 #include "gui/pie_menu.hpp"
 #include "gui/ui_context.hpp"
 #include "rendering/rendering_types.hpp"
+#include "selection/selection_service.hpp"
 #include <chrono>
+#include <cstdint>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,6 +32,19 @@ namespace lfs::vis {
             Scale
         };
 
+        // Selection mode is the shared-pivot transform for the current multi-selection;
+        // it is unrelated to scene graph GROUP nodes.
+        enum class MultiTransformMode {
+            Selection = 0,
+            Individual = 1
+        };
+
+        constexpr MultiTransformMode normalizeMultiTransformMode(const MultiTransformMode mode) {
+            return mode == MultiTransformMode::Individual
+                       ? MultiTransformMode::Individual
+                       : MultiTransformMode::Selection;
+        }
+
         class GizmoManager {
         public:
             explicit GizmoManager(VisualizerImpl* viewer);
@@ -43,19 +59,26 @@ namespace lfs::vis {
             void updateCropFlash();
             void deactivateAllTools();
             void setSelectionSubMode(SelectionSubMode mode);
+            void setSelectionVolumeFromDrag(SelectionSubMode mode,
+                                            SelectionMode apply_mode,
+                                            uint64_t source_generation,
+                                            const glm::vec3& center_world,
+                                            float radius);
 
             [[nodiscard]] TransformSpace getTransformSpace() const { return transform_space_; }
             void setTransformSpace(TransformSpace space);
             [[nodiscard]] PivotMode getPivotMode() const { return pivot_mode_; }
             void setPivotMode(PivotMode mode);
-            [[nodiscard]] GizmoOperation getCurrentOperation() const { return current_operation_; }
-            void setCurrentOperation(GizmoOperation op) { current_operation_ = op; }
+            [[nodiscard]] MultiTransformMode getMultiTransformMode() const { return multi_transform_mode_; }
+            void setMultiTransformMode(MultiTransformMode mode);
             [[nodiscard]] SelectionSubMode getSelectionSubMode() const { return selection_mode_; }
 
             [[nodiscard]] bool isCropboxGizmoActive() const;
             [[nodiscard]] bool isEllipsoidGizmoActive() const;
             LFS_VIS_API void setCropToolShape(const std::string& shape);
             [[nodiscard]] LFS_VIS_API std::string cropToolShape() const;
+            LFS_VIS_API void setCropToolOperation(const std::string& operation);
+            [[nodiscard]] LFS_VIS_API std::string cropToolOperation() const;
             LFS_VIS_API void fitActiveCropTool(bool use_percentile);
             LFS_VIS_API void applyActiveCropTool();
             [[nodiscard]] bool isViewportGizmoDragging() const { return viewport_gizmo_dragging_; }
@@ -94,6 +117,7 @@ namespace lfs::vis {
             SelectionSubMode selection_mode_ = SelectionSubMode::Centers;
             TransformSpace transform_space_ = TransformSpace::Local;
             PivotMode pivot_mode_ = PivotMode::Origin;
+            MultiTransformMode multi_transform_mode_ = MultiTransformMode::Selection;
 
             // Node transform gizmo
             bool show_node_gizmo_ = false;
@@ -130,6 +154,12 @@ namespace lfs::vis {
             glm::vec3 crop_tool_box_max_{0.5f};
             glm::vec3 crop_tool_ellipsoid_radii_{1.0f};
             glm::mat4 crop_tool_visualizer_transform_{1.0f};
+            SelectionMode selection_volume_apply_mode_ = SelectionMode::Replace;
+            uint64_t selection_volume_source_generation_ = 0;
+            std::shared_ptr<core::Tensor> selection_volume_base_mask_;
+            core::Scene::SelectionStateSnapshot selection_volume_selection_before_drag_;
+            bool selection_volume_gizmo_active_ = false;
+            bool selection_volume_drag_changed_ = false;
 
             // Unified gizmo context
             GizmoTransformContext gizmo_context_;
@@ -149,18 +179,26 @@ namespace lfs::vis {
             std::chrono::steady_clock::time_point crop_flash_start_;
             bool crop_flash_active_ = false;
 
-            // Bounds-mode scale gizmo state (single selection only)
+            // Bounds-mode scale gizmo state
             bool node_bounds_scale_active_ = false;
             glm::vec3 node_bounds_min_{0.0f};
             glm::vec3 node_bounds_max_{0.0f};
             glm::mat4 node_bounds_orig_visualizer_world_transform_{1.0f};
             glm::vec3 node_bounds_world_scale_{1.0f};
+            bool node_selection_bounds_scale_active_ = false;
+            glm::vec3 node_selection_bounds_min_{0.0f};
+            glm::vec3 node_selection_bounds_max_{0.0f};
 
             // Display cache to avoid per-frame compute_bounds on large splats
             bool node_bounds_cache_valid_ = false;
             core::NodeId node_bounds_cache_node_id_ = core::NULL_NODE;
             glm::vec3 node_bounds_cache_min_{0.0f};
             glm::vec3 node_bounds_cache_max_{0.0f};
+            bool node_selection_bounds_cache_valid_ = false;
+            std::vector<core::NodeId> node_selection_bounds_cache_node_ids_;
+            std::vector<glm::mat4> node_selection_bounds_cache_visualizer_world_transforms_;
+            glm::vec3 node_selection_bounds_cache_min_{0.0f};
+            glm::vec3 node_selection_bounds_cache_max_{0.0f};
 
             // Tool tracking
             SelectionSubMode previous_selection_mode_ = SelectionSubMode::Centers;
@@ -172,6 +210,8 @@ namespace lfs::vis {
             void handlePieMenuSelection();
             void handleCropAction(const std::string& action_id);
             [[nodiscard]] bool isCropToolActive() const;
+            [[nodiscard]] bool isSelectionVolumeMode() const;
+            [[nodiscard]] bool isVolumeGizmoToolActive() const;
             [[nodiscard]] std::optional<core::NodeId> selectedCropTargetNodeId() const;
             [[nodiscard]] bool ensureCropToolState();
             [[nodiscard]] bool computeCropToolTargetBounds(core::NodeId target_id,
@@ -183,6 +223,11 @@ namespace lfs::vis {
                                    const glm::vec3& bounds_max);
             void updateCropToolOverlayState();
             void clearCropToolOverlayState();
+            void clearSelectionVolumeState();
+            void captureSelectionVolumeBase(uint64_t source_generation);
+            [[nodiscard]] bool applySelectionVolumeFromGizmo(bool push_undo);
+            void beginSelectionVolumeGizmoDrag();
+            void finishSelectionVolumeGizmoDrag();
             void renderCropToolBoxGizmo(const UIContext& ctx, const ViewportLayout& viewport);
             void renderCropToolEllipsoidGizmo(const UIContext& ctx, const ViewportLayout& viewport);
         };

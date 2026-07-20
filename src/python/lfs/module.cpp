@@ -78,6 +78,7 @@
 #include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer/training/training_manager.hpp"
 #include "visualizer/visualizer.hpp"
+#include "visualizer/window/vulkan_context.hpp"
 #include "visualizer/window/window_manager.hpp"
 
 #include <atomic>
@@ -791,7 +792,8 @@ NB_MODULE(lichtfeld, m) {
            const std::string& output_path, const std::string& init_path,
            const std::string& centralize_dataset,
            std::optional<int> max_width,
-           bool apply_auto_crop) {
+           bool apply_auto_crop,
+           std::optional<int> min_track_length) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadFile{
                 .path = python_utf8_path(path),
@@ -800,6 +802,7 @@ NB_MODULE(lichtfeld, m) {
                 .init_path = python_utf8_path(init_path),
                 .centralize_dataset = centralize_dataset,
                 .max_width = max_width,
+                .min_track_length = min_track_length,
                 .apply_auto_crop = apply_auto_crop}
                 .emit();
         },
@@ -808,6 +811,7 @@ NB_MODULE(lichtfeld, m) {
         nb::arg("centralize_dataset") = "off",
         nb::arg("max_width") = nb::none(),
         nb::arg("apply_auto_crop") = false,
+        nb::arg("min_track_length") = nb::none(),
         "Load a file (PLY, checkpoint) or dataset into the scene.");
 
     m.def(
@@ -842,11 +846,12 @@ NB_MODULE(lichtfeld, m) {
     m.def(
         "export_scene",
         [](int format, const std::string& path, const std::vector<std::string>& node_names, int sh_degree,
-           bool rad_flip_y) {
-            lfs::python::invoke_export(format, path, node_names, sh_degree, rad_flip_y);
+           bool rad_flip_y, bool rad_streamable) {
+            lfs::python::invoke_export(format, path, node_names, sh_degree, rad_flip_y, rad_streamable);
         },
         nb::arg("format"), nb::arg("path"), nb::arg("node_names"), nb::arg("sh_degree"),
         nb::arg("rad_flip_y") = false,
+        nb::arg("rad_streamable") = true,
         "Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec, 6=RAD, 7=COLMAP.");
 
     m.def(
@@ -1005,6 +1010,12 @@ NB_MODULE(lichtfeld, m) {
     // Scene manipulation
     m.def(
         "set_node_visibility", [](const std::string& name, bool visible) {
+            if (auto* scene = get_scene_internal()) {
+                if (const auto* node = scene->getNode(name)) {
+                    lfs::core::events::cmd::SetNodeVisibilityById{.node_id = node->id, .visible = visible}.emit();
+                    return;
+                }
+            }
             lfs::core::events::cmd::SetPLYVisibility{.name = name, .visible = visible}.emit();
         },
         nb::arg("name"), nb::arg("visible"), "Set visibility of a scene node by name");
@@ -1040,6 +1051,12 @@ NB_MODULE(lichtfeld, m) {
 
     m.def(
         "remove_node", [](const std::string& name, bool keep_children) {
+            if (auto* scene = get_scene_internal()) {
+                if (const auto* node = scene->getNode(name)) {
+                    lfs::core::events::cmd::RemoveNodeById{.node_id = node->id, .keep_children = keep_children}.emit();
+                    return;
+                }
+            }
             lfs::core::events::cmd::RemovePLY{.name = name, .keep_children = keep_children}.emit();
         },
         nb::arg("name"), nb::arg("keep_children") = false, "Remove a scene node by name");
@@ -1076,18 +1093,49 @@ NB_MODULE(lichtfeld, m) {
 
     m.def(
         "reparent_node", [](const std::string& name, const std::string& new_parent) {
+            if (auto* scene = get_scene_internal()) {
+                const auto* node = scene->getNode(name);
+                if (!node)
+                    return;
+                lfs::core::NodeId parent_id = lfs::core::NULL_NODE;
+                if (!new_parent.empty()) {
+                    const auto* parent = scene->getNode(new_parent);
+                    if (!parent)
+                        return;
+                    parent_id = parent->id;
+                }
+                lfs::core::events::cmd::ReparentNodeById{.node_id = node->id, .new_parent_id = parent_id}.emit();
+                return;
+            }
             lfs::core::events::cmd::ReparentNode{.node_name = name, .new_parent_name = new_parent}.emit();
         },
         nb::arg("name"), nb::arg("new_parent"), "Move a node under a new parent node");
 
     m.def(
         "rename_node", [](const std::string& old_name, const std::string& new_name) {
+            if (auto* scene = get_scene_internal()) {
+                if (const auto* node = scene->getNode(old_name)) {
+                    lfs::core::events::cmd::RenameNodeById{.node_id = node->id, .new_name = new_name}.emit();
+                    return;
+                }
+            }
             lfs::core::events::cmd::RenamePLY{.old_name = old_name, .new_name = new_name}.emit();
         },
         nb::arg("old_name"), nb::arg("new_name"), "Rename a scene node");
 
     m.def(
         "add_group", [](const std::string& name, const std::string& parent) {
+            if (auto* scene = get_scene_internal()) {
+                lfs::core::NodeId parent_id = lfs::core::NULL_NODE;
+                if (!parent.empty()) {
+                    const auto* parent_node = scene->getNode(parent);
+                    if (!parent_node)
+                        return;
+                    parent_id = parent_node->id;
+                }
+                lfs::core::events::cmd::AddGroupByParentId{.name = name, .parent_id = parent_id}.emit();
+                return;
+            }
             lfs::core::events::cmd::AddGroup{.name = name, .parent_name = parent}.emit();
         },
         nb::arg("name"), nb::arg("parent") = "", "Add a group node to the scene");
@@ -1430,6 +1478,7 @@ NB_MODULE(lichtfeld, m) {
             auto it = cache.find(name);
             if (it != cache.end())
                 return it->second;
+            lfs::python::require_ui_texture_creation_thread();
             try {
                 const auto path = lfs::vis::getAssetPath("icon/" + name + ".png");
                 const auto [data, width, height, channels] = lfs::core::load_image_with_alpha(path);
@@ -1469,38 +1518,22 @@ NB_MODULE(lichtfeld, m) {
             const auto* controller = lfs::vis::InputController::instance();
             if (!controller)
                 return "orbit";
-            switch (controller->cameraNavigationMode()) {
-            case lfs::vis::InputController::CameraNavigationMode::Orbit: return "orbit";
-            case lfs::vis::InputController::CameraNavigationMode::Trackball: return "trackball";
-            case lfs::vis::InputController::CameraNavigationMode::FPV: return "fpv";
-            }
-            return "orbit";
+            return lfs::vis::InputController::cameraNavigationModeName(
+                controller->cameraNavigationMode());
         },
-        "Get the active camera navigation mode ('orbit', 'trackball', or 'fpv')");
+        "Get the active camera navigation mode ('orbit', 'trackball', 'fpv', or 'drone')");
     m.def(
         "set_camera_navigation_mode", [](const std::string& mode) {
             auto* controller = lfs::vis::InputController::instance();
             if (!controller)
                 return;
 
-            if (mode == "orbit") {
-                controller->setCameraNavigationMode(
-                    lfs::vis::InputController::CameraNavigationMode::Orbit);
-                return;
+            const auto parsed = lfs::vis::InputController::cameraNavigationModeFromName(mode);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "camera navigation mode must be 'orbit', 'trackball', 'turntable', 'fpv', 'fly', or 'drone'");
             }
-            if (mode == "trackball" || mode == "turntable") {
-                controller->setCameraNavigationMode(
-                    lfs::vis::InputController::CameraNavigationMode::Trackball);
-                return;
-            }
-            if (mode == "fpv" || mode == "fly") {
-                controller->setCameraNavigationMode(
-                    lfs::vis::InputController::CameraNavigationMode::FPV);
-                return;
-            }
-
-            throw std::invalid_argument(
-                "camera navigation mode must be 'orbit', 'trackball', 'turntable', 'fpv', or 'fly'");
+            controller->setCameraNavigationMode(*parsed);
         },
         nb::arg("mode"), "Set the active camera navigation mode");
     m.def(
@@ -1526,6 +1559,18 @@ NB_MODULE(lichtfeld, m) {
             return wm ? wm->isFullscreen() : false;
         },
         "Check if the window is in fullscreen mode");
+    m.def(
+        "get_vulkan_capabilities", []() {
+            nb::dict capabilities;
+            const auto* const window = lfs::vis::services().windowOrNull();
+            const auto* const context = window != nullptr ? window->getVulkanContext() : nullptr;
+            capabilities["mesh_wireframe"] =
+                context != nullptr && context->hasFillModeNonSolid();
+            capabilities["wide_lines"] =
+                context != nullptr && context->hasWideLines();
+            return capabilities;
+        },
+        "Return Vulkan device capabilities used to gate rendering controls");
     m.def(
         "toggle_ui", []() { lfs::core::events::ui::ToggleUI{}.emit(); },
         "Toggle UI overlay visibility");
@@ -1709,6 +1754,9 @@ NB_MODULE(lichtfeld, m) {
             return cb;
         },
         nb::arg("callback"), "Decorator for training end handler");
+
+    m.def("_clear_training_hooks", []() { ControlBoundary::instance().clear_all(); });
+    nb::module_::import_("atexit").attr("register")(m.attr("_clear_training_hooks"));
 
     // Register Tensor class
     lfs::python::register_tensor(m);

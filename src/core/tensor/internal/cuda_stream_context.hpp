@@ -4,10 +4,11 @@
 #pragma once
 
 #include <cuda_runtime.h>
-#include <stdexcept>
-#include <string>
+#include <initializer_list>
+#include <optional>
 
 #include "core/export.hpp"
+#include "core/tensor_fwd.hpp"
 
 namespace lfs::core {
 
@@ -16,36 +17,13 @@ namespace lfs::core {
     LFS_CORE_API cudaStream_t getCurrentCUDAStream();
     LFS_CORE_API void setCurrentCUDAStream(cudaStream_t stream);
 
-    inline void waitForCUDAStream(cudaStream_t execution_stream, cudaStream_t dependency_stream) {
-        if (dependency_stream == nullptr || dependency_stream == execution_stream) {
-            return;
-        }
+    // Makes execution_stream wait (GPU-side) for work currently enqueued on
+    // dependency_stream. Uses pooled events; falls back to a host sync on failure.
+    LFS_CORE_API void waitForCUDAStream(cudaStream_t execution_stream, cudaStream_t dependency_stream);
 
-        cudaEvent_t ready = nullptr;
-        cudaError_t status = cudaEventCreateWithFlags(&ready, cudaEventDisableTiming);
-        if (status == cudaSuccess) {
-            status = cudaEventRecord(ready, dependency_stream);
-            if (status == cudaSuccess) {
-                status = cudaStreamWaitEvent(execution_stream, ready, 0);
-            }
-        }
-
-        if (ready != nullptr) {
-            const cudaError_t destroy_status = cudaEventDestroy(ready);
-            if (status == cudaSuccess && destroy_status != cudaSuccess) {
-                status = destroy_status;
-            }
-        }
-
-        if (status != cudaSuccess) {
-            const cudaError_t sync_status = cudaStreamSynchronize(dependency_stream);
-            if (sync_status != cudaSuccess) {
-                throw std::runtime_error(
-                    std::string("Failed to synchronize CUDA streams: ") +
-                    cudaGetErrorString(sync_status));
-            }
-        }
-    }
+    LFS_CORE_API cudaStream_t prepare_inputs_for_stream(
+        std::initializer_list<const Tensor*> inputs,
+        std::optional<cudaStream_t> execution_stream = std::nullopt);
 
     /**
      * RAII guard for temporarily setting the current CUDA stream

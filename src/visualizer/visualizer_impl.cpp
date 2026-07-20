@@ -4,9 +4,11 @@
 
 #include "visualizer_impl.hpp"
 #include "core/animatable_property.hpp"
+#include "core/cuda_error.hpp"
 #include "core/data_loading_service.hpp"
-#include "core/event_bus.hpp"
+#include "core/event_bridge/event_bridge.hpp"
 #include "core/logger.hpp"
+#include "core/memory_pressure.hpp"
 #include "core/path_utils.hpp"
 #include "core/services.hpp"
 #include "gui/panel_registry.hpp"
@@ -29,13 +31,18 @@
 #include "tools/builtin_tools.hpp"
 #include "tools/selection_tool.hpp"
 #include "visualizer/app_store.hpp"
+#include "window/vulkan_context.hpp"
 #include <SDL3/SDL_events.h>
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
 #ifdef WIN32
 #include <windows.h>
 #endif
@@ -51,10 +58,70 @@ namespace lfs::vis {
                 window_manager->wakeEventLoop();
             }
         }
+
+        constexpr double kResizeSettleMinWaitSeconds = 0.001;
+        constexpr double kTooltipRevealMinWaitSeconds = 0.001;
+#if defined(__linux__)
+        constexpr auto kWindowResizePaintDemandWindow = std::chrono::milliseconds(160);
+#endif
+
         std::optional<glm::mat3> buildValidatedViewRotation(const glm::vec3& eye,
                                                             const glm::vec3& target,
                                                             const glm::vec3& requested_up) {
             return lfs::rendering::tryMakeVisualizerLookAtRotation(eye, target, requested_up);
+        }
+
+        [[nodiscard]] bool shouldPreserveResetTransform(const core::SceneNode& node) {
+            return node.type == core::NodeType::DATASET ||
+                   node.type == core::NodeType::POINTCLOUD ||
+                   node.type == core::NodeType::SPLAT ||
+                   node.type == core::NodeType::CROPBOX ||
+                   node.type == core::NodeType::ELLIPSOID;
+        }
+
+        [[nodiscard]] std::unordered_map<std::string, glm::mat4> collectResetTransforms(const core::Scene& scene) {
+            std::unordered_map<std::string, glm::mat4> transforms;
+            for (const auto* node : scene.getNodes()) {
+                if (node && shouldPreserveResetTransform(*node)) {
+                    transforms.emplace(node->name, node->transform());
+                }
+            }
+            return transforms;
+        }
+
+        void cancelRemainingWork(std::vector<Visualizer::WorkItem>& work,
+                                 const size_t first,
+                                 const std::string_view queue_name) noexcept {
+            for (size_t i = first; i < work.size(); ++i) {
+                try {
+                    if (work[i].cancel)
+                        work[i].cancel();
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Exception while cancelling {} work: {}", queue_name, e.what());
+                } catch (...) {
+                    LOG_ERROR("Unknown exception while cancelling {} work", queue_name);
+                }
+            }
+        }
+
+        // Posted work is an external callback boundary. A failing item may report
+        // through its own promise, but must never unwind the GUI frame loop.
+        void runPostedWork(std::vector<Visualizer::WorkItem>& work,
+                           const std::string_view queue_name) noexcept {
+            for (size_t i = 0; i < work.size(); ++i) {
+                try {
+                    if (work[i].run)
+                        work[i].run();
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Exception in {} work: {}", queue_name, e.what());
+                    cancelRemainingWork(work, i + 1, queue_name);
+                    return;
+                } catch (...) {
+                    LOG_ERROR("Unknown exception in {} work", queue_name);
+                    cancelRemainingWork(work, i + 1, queue_name);
+                    return;
+                }
+            }
         }
 
     } // namespace
@@ -130,7 +197,7 @@ namespace lfs::vis {
 
     VisualizerImpl::~VisualizerImpl() {
         // Clear event handlers before destroying components to prevent use-after-free
-        lfs::core::event::bus().clear_all();
+        lfs::event::EventBridge::instance().clear_all();
         services().clear();
 
         // Clear operator system
@@ -511,6 +578,19 @@ namespace lfs::vis {
                     gm->gizmo().setTransformSpace(static_cast<TransformSpace>(space));
             });
         callback_cleanup_.add([] { python::set_transform_space_callbacks(nullptr, nullptr); });
+        python::set_multi_transform_mode_callbacks(
+            []() -> int {
+                const auto* gm = python::get_gui_manager();
+                return gm ? static_cast<int>(gm->gizmo().getMultiTransformMode()) : 0;
+            },
+            [](int mode) {
+                if (auto* gm = python::get_gui_manager()) {
+                    const auto normalized_mode =
+                        gui::normalizeMultiTransformMode(static_cast<gui::MultiTransformMode>(mode));
+                    gm->gizmo().setMultiTransformMode(normalized_mode);
+                }
+            });
+        callback_cleanup_.add([] { python::set_multi_transform_mode_callbacks(nullptr, nullptr); });
         python::set_thumbnail_callbacks(
             [](const char* video_id) {
                 if (auto* gm = python::get_gui_manager())
@@ -533,7 +613,8 @@ namespace lfs::vis {
         callback_cleanup_.add([] { python::set_scene_manager(nullptr); });
 
         python::set_export_callback([](int format, const char* path, const char** node_names,
-                                       int node_count, int sh_degree, bool rad_flip_y) {
+                                       int node_count, int sh_degree, bool rad_flip_y,
+                                       bool rad_streamable) {
             if (auto* gm = python::get_gui_manager()) {
                 std::vector<std::string> names;
                 names.reserve(node_count);
@@ -542,7 +623,8 @@ namespace lfs::vis {
                 }
                 gm->asyncTasks().performExport(static_cast<lfs::core::ExportFormat>(format),
                                                lfs::core::utf8_to_path(path), names, sh_degree,
-                                               rad_flip_y);
+                                               rad_flip_y,
+                                               rad_streamable);
             }
         });
         callback_cleanup_.add([] { python::set_export_callback(nullptr); });
@@ -627,12 +709,11 @@ namespace lfs::vis {
                 return;
             }
 
-            viewport_.camera.R = *rotation;
-            viewport_.camera.t = eye;
+            viewport_.setViewMatrix(*rotation, eye);
             viewport_.camera.setPivot(target);
 
             if (rendering_manager_)
-                rendering_manager_->markDirty(DirtyFlag::CAMERA);
+                rendering_manager_->markCameraPoseChanged();
         });
         callback_cleanup_.add([] { vis::set_set_view_callback(nullptr); });
 
@@ -652,11 +733,10 @@ namespace lfs::vis {
             }
 
             Viewport& vp = rendering_manager_->resolvePanelViewport(viewport_, panel);
-            vp.camera.R = *rotation;
-            vp.camera.t = eye;
+            vp.setViewMatrix(*rotation, eye);
             vp.camera.setPivot(target);
 
-            rendering_manager_->markDirty(DirtyFlag::CAMERA);
+            rendering_manager_->markCameraPoseChanged();
         });
         callback_cleanup_.add([] { vis::set_set_view_for_panel_callback(nullptr); });
 
@@ -721,6 +801,51 @@ namespace lfs::vis {
         main_loop_->setRenderCallback([this]() { render(); });
         main_loop_->setShutdownCallback([this]() { shutdown(); });
         main_loop_->setShouldCloseCallback([this]() { return allowclose(); });
+        main_loop_->setInterruptCallback([this]() { requestApplicationClose(); });
+        main_loop_->setFrameErrorCallback([this](std::exception_ptr eptr) {
+            handleFrameException(std::move(eptr));
+        });
+        main_loop_->setFrameCompletedCallback([this]() { onFrameCompleted(); });
+    }
+
+    void VisualizerImpl::handleFrameException(std::exception_ptr eptr) noexcept {
+        try {
+            std::rethrow_exception(eptr);
+        } catch (const lfs::core::MemoryAllocationError& e) {
+            if (lfs::core::cuda_is_unavailable()) {
+                return;
+            }
+            // GPU memory shortage reached the frame loop. Reclaim render-safe
+            // caches once and keep running; the next frame is the retry.
+            auto& coordinator = lfs::core::MemoryPressureCoordinator::instance();
+            const size_t freed = coordinator.run_episode(
+                e.failure(), lfs::core::PressureContext::RenderThread);
+            ++consecutive_oom_frames_;
+            LOG_ERROR("GPU memory pressure during frame (attempt {}): {}. Freed {:.1f} MiB; "
+                      "reducing preview quality and retrying.",
+                      consecutive_oom_frames_, e.what(),
+                      static_cast<double>(freed) / (1024.0 * 1024.0));
+        } catch (const std::exception& e) {
+            const auto now = std::chrono::steady_clock::now();
+            if (last_frame_error_log_.time_since_epoch().count() == 0 ||
+                now - last_frame_error_log_ >= std::chrono::seconds(5)) {
+                LOG_ERROR("Frame failed: {}{}", e.what(),
+                          suppressed_frame_errors_ > 0
+                              ? std::format(" ({} similar errors suppressed)", suppressed_frame_errors_)
+                              : std::string{});
+                last_frame_error_log_ = now;
+                suppressed_frame_errors_ = 0;
+            } else {
+                ++suppressed_frame_errors_;
+            }
+        } catch (...) {
+            LOG_ERROR("Frame failed with an unknown error");
+        }
+    }
+
+    void VisualizerImpl::onFrameCompleted() noexcept {
+        consecutive_oom_frames_ = 0;
+        lfs::core::MemoryPressureCoordinator::instance().maybe_recover();
     }
 
     void VisualizerImpl::beginShutdown([[maybe_unused]] const std::string_view reason) {
@@ -735,6 +860,8 @@ namespace lfs::vis {
             pending_work.swap(work_queue_);
             pending_render_work.swap(render_work_queue_);
         }
+
+        python::request_plugin_preload_stop();
 
         for (auto& work : pending_work) {
             if (work.cancel)
@@ -765,9 +892,14 @@ namespace lfs::vis {
                 LOG_WARN("Cannot reset: no dataset");
                 return;
             }
-            if (trainer_manager_ && trainer_manager_->isTrainingActive()) {
-                pending_reset_ = true;
-                trainer_manager_->stopTraining();
+            if (trainer_manager_ &&
+                (trainer_manager_->isTrainingActive() || trainer_manager_->isCompletionPending())) {
+                if (pending_training_action_ == PendingTrainingAction::None) {
+                    pending_training_action_ = PendingTrainingAction::Reset;
+                }
+                if (trainer_manager_->canStop()) {
+                    trainer_manager_->stopTraining();
+                }
                 return;
             }
             performReset();
@@ -955,6 +1087,14 @@ namespace lfs::vis {
         cmd::SaveAsset::when([this](const auto& cmd) {
             python::invoke_save_asset(cmd.node_name);
         });
+
+        cmd::SaveAssetById::when([this](const auto& cmd) {
+            if (!scene_manager_)
+                return;
+            const auto* node = scene_manager_->getScene().getNodeById(static_cast<core::NodeId>(cmd.node_id));
+            if (node)
+                python::invoke_save_asset(node->name);
+        });
     }
 
     bool VisualizerImpl::initialize() {
@@ -1026,10 +1166,6 @@ namespace lfs::vis {
             python::ensure_builtin_ui_registered();
         }
         {
-            LOG_TIMER("startup.python.preload_plugins_async");
-            python::preload_user_plugins_async();
-        }
-        {
             LOG_TIMER("startup.window.showWindow");
             window_manager_->showWindow();
         }
@@ -1039,8 +1175,29 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::update() {
+        const auto update_started_at = std::chrono::steady_clock::now();
+        const bool preload_running_at_start = python::is_plugin_preload_running();
         update_work_processed_ = false;
         window_manager_->updateWindowSize();
+
+        if (fully_initialized_ && gui_frame_rendered_ && !startup_plugin_preload_started_) {
+            startup_plugin_preload_started_ = true;
+            LOG_TIMER("startup.python.preload_plugins_async");
+            python::preload_user_plugins_async();
+        }
+
+        const auto plugin_load_status = python::get_startup_plugin_load_status();
+        if (gui_manager_ &&
+            plugin_load_status.revision != startup_plugin_load_status_revision_) {
+            const bool plugin_load_started = plugin_load_status.state != "not_started";
+            gui_manager_->setStartupPluginLoadState(
+                plugin_load_started,
+                plugin_load_status.active,
+                plugin_load_status.progress,
+                plugin_load_status.detail);
+            assert(!plugin_load_started || !gui_manager_->isStartupBlockingInput());
+            startup_plugin_load_status_revision_ = plugin_load_status.revision;
+        }
 
         // Process MCP work queue
         {
@@ -1050,18 +1207,7 @@ namespace lfs::vis {
                 work.swap(work_queue_);
             }
             update_work_processed_ = !work.empty();
-            for (size_t i = 0; i < work.size(); ++i) {
-                try {
-                    if (work[i].run)
-                        work[i].run();
-                } catch (...) {
-                    for (size_t j = i + 1; j < work.size(); ++j) {
-                        if (work[j].cancel)
-                            work[j].cancel();
-                    }
-                    throw;
-                }
-            }
+            runPostedWork(work, "viewer");
         }
 
         if (gui_manager_) {
@@ -1075,21 +1221,17 @@ namespace lfs::vis {
         // Update editor context state from scene/trainer
         editor_context_.update(scene_manager_.get(), trainer_manager_.get());
 
+        if (pending_training_completion_refresh_frames_ > 0 &&
+            (!trainer_manager_ || !trainer_manager_->isTrainingActive())) {
+            --pending_training_completion_refresh_frames_;
+            if (rendering_manager_) {
+                rendering_manager_->markDirty(DirtyFlag::ALL);
+            }
+            wakeMainLoop();
+        }
+
         if (selection_tool_ && selection_tool_->isEnabled() && tool_context_) {
             selection_tool_->update(*tool_context_);
-        }
-
-        if (pending_new_project_ && trainer_manager_ &&
-            trainer_manager_->canPerform(TrainingAction::ClearScene)) {
-            pending_new_project_ = false;
-            trainer_manager_->waitForCompletion();
-            performNewProject();
-        }
-
-        if (pending_reset_ && trainer_manager_ && !trainer_manager_->isTrainingActive()) {
-            pending_reset_ = false;
-            trainer_manager_->waitForCompletion();
-            performReset();
         }
 
         if (!gui_frame_rendered_) {
@@ -1097,21 +1239,8 @@ namespace lfs::vis {
         } else if (!pending_view_paths_.empty()) {
             auto paths = std::exchange(pending_view_paths_, {});
             LOG_INFO("Loading {} splat file(s)", paths.size());
-            if (const auto result = data_loader_->loadPLY(paths[0]); !result) {
-                LOG_ERROR("Failed to load {}: {}", lfs::core::path_to_utf8(paths[0]), result.error());
-                state::SplatFileLoadFailed{.path = paths[0], .error = result.error()}.emit();
-            } else {
-                for (size_t i = 1; i < paths.size(); ++i) {
-                    try {
-                        data_loader_->addSplatFileToScene(paths[i]);
-                    } catch (const std::exception& e) {
-                        LOG_ERROR("Failed to add {}: {}", lfs::core::path_to_utf8(paths[i]), e.what());
-                        state::SplatFileLoadFailed{.path = paths[i], .error = e.what()}.emit();
-                    }
-                }
-                if (paths.size() > 1) {
-                    scene_manager_->consolidateNodeModels();
-                }
+            if (const auto result = data_loader_->loadSplatFiles(paths); !result) {
+                LOG_ERROR("Failed to load startup splat batch: {}", result.error());
             }
         } else if (!pending_dataset_path_.empty()) {
             auto path = std::exchange(pending_dataset_path_, {});
@@ -1133,6 +1262,27 @@ namespace lfs::vis {
             LOG_INFO("Auto-starting training (--train flag)");
             cmd::StartTraining{}.emit();
         }
+
+        const bool preload_running_at_end = python::is_plugin_preload_running();
+        // The transition update can also consume pending startup assets (for example,
+        // a --view PLY) after it starts the worker. Sample only steady-state preload
+        // updates so unrelated startup I/O is not attributed to plugin loading.
+        if (preload_running_at_start) {
+            plugin_preload_timing_active_ = true;
+            plugin_preload_max_update_stall_ = std::max(
+                plugin_preload_max_update_stall_,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - update_started_at));
+        }
+        if (plugin_preload_timing_active_ && !preload_running_at_end) {
+            const double max_stall_ms =
+                std::chrono::duration<double, std::milli>(
+                    plugin_preload_max_update_stall_)
+                    .count();
+            LOG_DEBUG("Plugin preload frame budget: max VisualizerImpl::update stall {:.3f} ms",
+                      max_stall_ms);
+            plugin_preload_timing_active_ = false;
+        }
     }
 
     void VisualizerImpl::processRenderWorkQueue() {
@@ -1145,19 +1295,7 @@ namespace lfs::vis {
             return;
 
         processing_render_work_ = true;
-        for (size_t i = 0; i < render_work.size(); ++i) {
-            try {
-                if (render_work[i].run)
-                    render_work[i].run();
-            } catch (...) {
-                for (size_t j = i + 1; j < render_work.size(); ++j) {
-                    if (render_work[j].cancel)
-                        render_work[j].cancel();
-                }
-                processing_render_work_ = false;
-                throw;
-            }
-        }
+        runPostedWork(render_work, "render");
         processing_render_work_ = false;
     }
 
@@ -1218,14 +1356,30 @@ namespace lfs::vis {
         demand.viewport_export_locked = viewport_export_locked;
         demand.scene_dirty = rendering_manager_ && rendering_manager_->pollDirtyState();
         demand.continuous_input = input_controller_ && input_controller_->isContinuousInputActive();
-        demand.python_animation = python::has_frame_callback();
-        demand.python_overlay = python::has_viewport_draw_handlers();
+        const bool plugin_preload_running = python::is_plugin_preload_running();
+        demand.python_animation = !plugin_preload_running && python::has_frame_callback();
+        demand.python_overlay = !plugin_preload_running && python::has_viewport_draw_handlers();
         demand.python_redraw = python::consume_redraw_request();
-        demand.gui_animation = gui_manager_ && gui_manager_->needsAnimationFrame();
+        demand.gui_animation = (gui_manager_ && gui_manager_->needsAnimationFrame()) || plugin_preload_running;
         demand.input_event = inputFrameRequestsRender();
         demand.posted_work = update_work_processed_;
         demand.render_work = hasPendingRenderWork();
         demand.store_dirty = drained_store_dirty || app_store().store().has_dirty();
+        if (auto* vulkan_context = window_manager_ ? window_manager_->getVulkanContext() : nullptr) {
+            demand.swapchain_resize_pending = vulkan_context->hasPendingSwapchainResize();
+            demand.swapchain_resize_ready = demand.swapchain_resize_pending &&
+                                            vulkan_context->pendingSwapchainResizeReady();
+        }
+#if defined(__linux__)
+        if (window_manager_) {
+            demand.window_resize_paint_pending =
+                window_manager_->hasRecentWindowSizeChange(kWindowResizePaintDemandWindow);
+        }
+#endif
+        demand.viewport_resize_deferring = rendering_manager_ &&
+                                           rendering_manager_->isViewportResizeDeferring();
+        demand.viewport_resize_settle_ready = rendering_manager_ &&
+                                              rendering_manager_->viewportResizeSettleReady();
         return demand;
     }
 
@@ -1233,12 +1387,25 @@ namespace lfs::vis {
         if (!window_manager_)
             return;
 
+        auto wait_seconds = is_training ? 0.1 : 0.5;
+        if (rendering_manager_ && rendering_manager_->hasPendingViewportResizeSettle()) {
+            const double settle_wait = rendering_manager_->secondsUntilViewportResizeSettleReady();
+            wait_seconds = std::min(wait_seconds,
+                                    std::max(kResizeSettleMinWaitSeconds, settle_wait));
+        }
+
+        // Wake exactly when a pending tooltip is due so the reveal costs a single
+        // frame instead of rendering continuously through the hover delay.
+        if (gui_manager_) {
+            if (const auto tooltip_wait = gui_manager_->secondsUntilTooltipReveal())
+                wait_seconds = std::min(wait_seconds,
+                                        std::max(kTooltipRevealMinWaitSeconds, *tooltip_wait));
+        }
+
         if (is_training) {
-            constexpr double TRAINING_WAIT_SEC = 0.1; // ~10 Hz
-            window_manager_->waitEvents(TRAINING_WAIT_SEC);
+            window_manager_->waitEvents(wait_seconds); // Training tick is capped at ~10 Hz when no resize settle is due.
         } else {
-            constexpr double IDLE_WAIT_SEC = 0.5;
-            window_manager_->waitEvents(IDLE_WAIT_SEC);
+            window_manager_->waitEvents(wait_seconds);
         }
     }
 
@@ -1252,12 +1419,15 @@ namespace lfs::vis {
         delta_time = std::min(delta_time, 1.0f / 30.0f);
 
         const bool viewport_export_locked = gui_manager_ && gui_manager_->isViewportExportLocked();
+        if (window_manager_) {
+            window_manager_->updateWindowSize("render_begin");
+        }
         if (viewport_export_locked && window_manager_) {
             window_manager_->pollEvents();
         }
 
         // Tick Python frame callback for animations
-        if (python::has_frame_callback()) {
+        if (!python::is_plugin_preload_running() && python::has_frame_callback()) {
             python::tick_frame_callback(delta_time);
             if (rendering_manager_) {
                 rendering_manager_->markDirty(DirtyFlag::ALL);
@@ -1282,7 +1452,9 @@ namespace lfs::vis {
         }
 
         if (input_controller_) {
-            if (!viewport_export_locked) {
+            const bool startup_overlay_blocking =
+                gui_manager_ && gui_manager_->isStartupBlockingInput();
+            if (!viewport_export_locked && !startup_overlay_blocking) {
                 input_controller_->update(delta_time);
             }
         }
@@ -1334,7 +1506,7 @@ namespace lfs::vis {
         const bool is_training = trainer_manager_ && trainer_manager_->isRunning();
         const FrameDemand frame_demand = collectFrameDemand(viewport_export_locked, store_dirty);
         if (gui_frame_rendered_ && !frame_demand.shouldRenderFrame()) {
-            LOG_PERF("loop_idle skip_gui_render=true needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={} store_dirty={}",
+            LOG_PERF("loop_idle skip_gui_render=true needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={} store_dirty={} swapchain_resize_pending={} swapchain_resize_ready={} window_resize_paint_pending={} viewport_resize_deferring={} viewport_resize_settle_ready={}",
                      frame_demand.scene_dirty,
                      frame_demand.continuous_input,
                      frame_demand.python_animation,
@@ -1344,14 +1516,21 @@ namespace lfs::vis {
                      frame_demand.input_event,
                      frame_demand.posted_work,
                      frame_demand.render_work,
-                     frame_demand.store_dirty);
-            python::flush_signals();
+                     frame_demand.store_dirty,
+                     frame_demand.swapchain_resize_pending,
+                     frame_demand.swapchain_resize_ready,
+                     frame_demand.window_resize_paint_pending,
+                     frame_demand.viewport_resize_deferring,
+                     frame_demand.viewport_resize_settle_ready);
+            if (!python::is_plugin_preload_running()) {
+                python::flush_signals();
+            }
             waitForNextEvent(is_training);
             return;
         }
 
         if (!viewport_export_locked && !interactive_transition_settling) {
-            if (frame_demand.python_redraw && gui_manager_)
+            if (!python::is_plugin_preload_running() && frame_demand.python_redraw && gui_manager_)
                 gui_manager_->syncVisiblePanelsBeforeSceneRender();
 
             const auto vulkan_frame = rendering_manager_->renderVulkanFrame(context);
@@ -1408,19 +1587,23 @@ namespace lfs::vis {
         }
         if (gui_manager_) {
             LOG_TIMER("VisualizerImpl::render.gui_frame_total_with_swapchain_wait");
+            window_manager_->updateWindowSize("pre_gui_render");
             gui_manager_->render();
+            window_manager_->refreshResizeCursor();
         } else {
             processRenderWorkQueue();
         }
 
-        python::flush_signals();
+        if (!python::is_plugin_preload_running()) {
+            python::flush_signals();
+        }
         gui_frame_rendered_ = true;
         update_work_processed_ = false;
 
         // Render-on-demand: VSync handles frame pacing, waitEvents saves CPU when idle
         const FrameDemand next_demand = collectFrameDemand(viewport_export_locked);
 
-        LOG_PERF("loop_end needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={} store_dirty={}",
+        LOG_PERF("loop_end needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={} store_dirty={} swapchain_resize_pending={} swapchain_resize_ready={} window_resize_paint_pending={} viewport_resize_deferring={} viewport_resize_settle_ready={}",
                  next_demand.scene_dirty,
                  next_demand.continuous_input,
                  next_demand.python_animation,
@@ -1430,7 +1613,12 @@ namespace lfs::vis {
                  next_demand.input_event,
                  next_demand.posted_work,
                  next_demand.render_work,
-                 next_demand.store_dirty);
+                 next_demand.store_dirty,
+                 next_demand.swapchain_resize_pending,
+                 next_demand.swapchain_resize_ready,
+                 next_demand.window_resize_paint_pending,
+                 next_demand.viewport_resize_deferring,
+                 next_demand.viewport_resize_settle_ready);
 
         if (next_demand.needsContinuousLoop()) {
             window_manager_->pollEvents();
@@ -1446,12 +1634,31 @@ namespace lfs::vis {
             return false;
         }
 
+        const auto defer_close_for_training = [this] {
+            if (!trainer_manager_ ||
+                (!trainer_manager_->isTrainingActive() && !trainer_manager_->isCompletionPending())) {
+                return false;
+            }
+            pending_training_action_ = PendingTrainingAction::Close;
+            if (trainer_manager_->canStop()) {
+                trainer_manager_->stopTraining();
+            }
+            window_manager_->cancelClose();
+            return true;
+        };
+
         if (!gui_manager_) {
+            if (defer_close_for_training()) {
+                return false;
+            }
             beginShutdown();
             return true;
         }
 
         if (gui_manager_->isForceExit()) {
+            if (defer_close_for_training()) {
+                return false;
+            }
             beginShutdown();
 #ifdef WIN32
             const HWND hwnd = GetConsoleWindow();
@@ -1474,14 +1681,15 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::shutdown() {
+        if (trainer_manager_ &&
+            (trainer_manager_->isTrainingActive() || trainer_manager_->isCompletionPending())) {
+            LOG_CRITICAL("Shutdown reached before the training worker was reaped");
+            return;
+        }
+
         beginShutdown();
 
-        // Stop training before GPU resources are freed
         if (trainer_manager_) {
-            if (trainer_manager_->isTrainingActive()) {
-                trainer_manager_->stopTraining();
-                trainer_manager_->waitForCompletion();
-            }
             trainer_manager_.reset();
         }
 
@@ -1605,6 +1813,9 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::handleNewProject() {
+        if (pending_training_action_ == PendingTrainingAction::Close) {
+            return;
+        }
         if (gui_manager_) {
             gui_manager_->asyncTasks().cancelImport();
         }
@@ -1612,17 +1823,21 @@ namespace lfs::vis {
         pending_view_paths_.clear();
         pending_dataset_path_.clear();
         pending_auto_train_ = false;
-        pending_reset_ = false;
+        if (pending_training_action_ == PendingTrainingAction::Reset) {
+            pending_training_action_ = PendingTrainingAction::None;
+        }
 
-        if (trainer_manager_ && !trainer_manager_->canPerform(TrainingAction::ClearScene)) {
-            pending_new_project_ = true;
+        if (trainer_manager_ &&
+            (!trainer_manager_->canPerform(TrainingAction::ClearScene) ||
+             trainer_manager_->isCompletionPending())) {
+            pending_training_action_ = PendingTrainingAction::NewProject;
             if (trainer_manager_->canStop()) {
                 trainer_manager_->stopTraining();
             }
             return;
         }
 
-        pending_new_project_ = false;
+        pending_training_action_ = PendingTrainingAction::None;
         performNewProject();
     }
 
@@ -1645,8 +1860,8 @@ namespace lfs::vis {
         pending_view_paths_.clear();
         pending_dataset_path_.clear();
         pending_auto_train_ = false;
-        pending_new_project_ = false;
-        pending_reset_ = false;
+        pending_training_action_ = PendingTrainingAction::None;
+        pending_training_action_posted_ = false;
     }
 
     void VisualizerImpl::wakeMainLoop() const {
@@ -1736,6 +1951,7 @@ namespace lfs::vis {
         }
 
         const auto preserved_camera = viewport_.camera;
+        const auto preserved_transforms = collectResetTransforms(scene_manager_->getScene());
 
         const auto& init_path = data_loader_->getParameters().init_path;
         if (auto* const param_mgr = services().paramsOrNull(); param_mgr && param_mgr->ensureLoaded()) {
@@ -1754,7 +1970,7 @@ namespace lfs::vis {
                 selection_tool_->syncDepthFilterToCamera(viewport_);
             }
             if (rendering_manager_) {
-                rendering_manager_->markDirty(DirtyFlag::CAMERA);
+                rendering_manager_->markCameraPoseChanged();
             }
             ui::CameraMove{
                 .rotation = viewport_.getRotationMatrix(),
@@ -1767,6 +1983,15 @@ namespace lfs::vis {
             LOG_ERROR("Reset reload failed: {}", result.error());
             restore_camera();
             return;
+        }
+
+        if (!preserved_transforms.empty()) {
+            auto& scene = scene_manager_->getScene();
+            for (const auto& [name, transform] : preserved_transforms) {
+                if (scene.getNode(name)) {
+                    scene.setNodeTransform(name, transform);
+                }
+            }
         }
 
         restore_camera();
@@ -1794,8 +2019,59 @@ namespace lfs::vis {
 
     void VisualizerImpl::handleTrainingCompleted([[maybe_unused]] const state::TrainingCompleted& event) {
         if (scene_manager_) {
-            scene_manager_->changeContentType(SceneManager::ContentType::Dataset);
+            auto& scene = scene_manager_->getScene();
+            const std::string& model_name = scene.getTrainingModelNodeName();
+            if (!model_name.empty()) {
+                if (const auto* model_node = scene.getNode(model_name); model_node && !model_node->visible) {
+                    scene.setNodeVisibility(model_name, true);
+                }
+            }
         }
+
+        pending_training_completion_refresh_frames_ = 3;
+        if (rendering_manager_) {
+            rendering_manager_->markDirty(DirtyFlag::ALL);
+        }
+        wakeMainLoop();
+        schedulePendingTrainingAction();
+    }
+
+    void VisualizerImpl::schedulePendingTrainingAction() {
+        if (pending_training_action_ == PendingTrainingAction::None || pending_training_action_posted_) {
+            return;
+        }
+        pending_training_action_posted_ = postWork({
+            .run = [this] { performPendingTrainingAction(); },
+            .cancel = [this] { pending_training_action_posted_ = false; },
+        });
+    }
+
+    void VisualizerImpl::performPendingTrainingAction() {
+        pending_training_action_posted_ = false;
+        const auto action = std::exchange(pending_training_action_, PendingTrainingAction::None);
+        switch (action) {
+        case PendingTrainingAction::Reset:
+            performReset();
+            break;
+        case PendingTrainingAction::NewProject:
+            performNewProject();
+            break;
+        case PendingTrainingAction::Close:
+            requestApplicationClose();
+            break;
+        case PendingTrainingAction::None:
+            break;
+        }
+    }
+
+    void VisualizerImpl::requestApplicationClose() {
+        if (gui_manager_) {
+            gui_manager_->setForceExit(true);
+        }
+        if (window_manager_) {
+            window_manager_->requestClose();
+        }
+        wakeMainLoop();
     }
 
     void VisualizerImpl::handleSwitchToLatestCheckpoint() {

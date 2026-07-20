@@ -20,6 +20,16 @@ body {
     z-index: 1;
 }
 
+.viewport-frame-border {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4dp;
+    pointer-events: none;
+    z-index: 1;
+}
+
 .panel-toolbar-root {
     position: absolute;
     top: 0;
@@ -31,15 +41,6 @@ body {
     display: flex;
     padding: 0;
     gap: 0;
-}
-
-.shelf-background {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 40dp;
-    pointer-events: none;
 }
 
 .toolbar-vertical {
@@ -54,6 +55,10 @@ body {
     align-items: center;
     pointer-events: auto;
     overflow-y: auto;
+}
+
+#secondary-utility-toolbar {
+    left: -20dp;
 }
 
 .toolbar-vertical .icon-btn {
@@ -85,6 +90,59 @@ body {
     height: 20dp;
 }
 
+.viewport-gizmo-controls {
+    position: absolute;
+    top: 108dp;
+    right: 10dp;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 95dp;
+    gap: 3dp;
+    pointer-events: none;
+    z-index: 8;
+}
+
+.viewport-gizmo-control-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    width: 95dp;
+    gap: 3dp;
+    pointer-events: auto;
+}
+
+.viewport-gizmo-controls .icon-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30dp;
+    height: 30dp;
+    min-width: 30dp;
+    min-height: 30dp;
+    margin: 0;
+    padding: 3dp;
+    border-width: 1dp;
+    border-color: transparent;
+    border-radius: 6dp;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    opacity: 0.88;
+    transition: background-color border-color opacity 0.12s quadratic-out;
+}
+
+.viewport-gizmo-controls .icon-btn:hover,
+.viewport-gizmo-controls .icon-btn.selected {
+    opacity: 1;
+}
+
+.viewport-gizmo-controls .icon-btn img {
+    width: 20dp;
+    height: 20dp;
+}
+
 .toolbar-hcenter {
     position: absolute;
     left: 0;
@@ -109,11 +167,11 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22dp;
-    height: 22dp;
-    min-width: 22dp;
-    min-height: 22dp;
-    padding: 2dp;
+    width: 30dp;
+    height: 30dp;
+    min-width: 30dp;
+    min-height: 30dp;
+    padding: 3dp;
     border-width: 1dp;
     border-color: transparent;
     border-radius: 6dp;
@@ -123,8 +181,8 @@ body {
 }
 
 .toolbar-hcenter .icon-btn img {
-    width: 17dp;
-    height: 17dp;
+    width: 20dp;
+    height: 20dp;
 }
 
 .toolbar-layer-primary {
@@ -314,8 +372,8 @@ body {
 }
 
 .viewport-depth-axis > .viewport-transform-axis-label {
-    width: 28dp;
-    min-width: 28dp;
+    width: auto;
+    min-width: 0;
     font-size: 12dp;
     line-height: 24dp;
     text-align: left;
@@ -339,21 +397,30 @@ body {
     top: 0;
 }
 
-.viewport-selection-depth-axis > .number-input.viewport-depth-input {
-    width: 74dp;
-    min-width: 74dp;
-    height: 24dp;
-    min-height: 24dp;
-    font-size: 12dp;
-    line-height: 22dp;
-    padding: 0 5dp;
-}
-
-#depth-view-block .viewport-selection-depth-axis > .number-input.viewport-depth-input {
+#depth-view-block .viewport-depth-axis > .scrub-field {
+    width: 112dp;
+    min-width: 112dp;
     height: 22dp;
     min-height: 22dp;
-    line-height: 16dp;
-    padding: 2dp 5dp;
+}
+
+#depth-view-block .viewport-depth-axis > .viewport-depth-step-btn {
+    width: 18dp;
+    min-width: 18dp;
+    height: 22dp;
+    min-height: 22dp;
+    line-height: 20dp;
+    padding: 0 0 1dp 0;
+    margin-left: 0;
+    font-size: 12dp;
+    border-radius: 4dp;
+    box-sizing: border-box;
+    flex-shrink: 0;
+}
+
+#depth-view-block .viewport-depth-axis > .viewport-depth-step-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
 }
 
 .viewport-selection-actions {
@@ -396,6 +463,22 @@ body {
     padding: 5dp 6dp;
     border-radius: 6dp;
     gap: 0;
+    min-width: 0;
+}
+
+#gt-compare-mode-block .viewport-gt-compare-panel {
+    padding: 5dp 6dp;
+    border-radius: 6dp;
+    gap: 0;
+    min-width: 0;
+}
+
+#gt-compare-mode-block .viewport-gt-compare-mode-select {
+    width: 120dp;
+    min-width: 120dp;
+    height: 22dp;
+    min-height: 22dp;
+    line-height: 20dp;
 }
 
 .viewport-transform-panel.viewport-export-panel {
@@ -532,11 +615,11 @@ body {
 #selection-block .viewport-transform-option,
 #selection-block .viewport-transform-action,
 #depth-view-block .viewport-transform-action {
-    width: 22dp;
-    height: 22dp;
-    min-width: 22dp;
-    min-height: 22dp;
-    padding: 2dp;
+    width: 30dp;
+    height: 30dp;
+    min-width: 30dp;
+    min-height: 30dp;
+    padding: 3dp;
 }
 
 #transform-block .viewport-transform-option img,
@@ -544,8 +627,19 @@ body {
 #selection-block .viewport-transform-option img,
 #selection-block .viewport-transform-action img,
 #depth-view-block .viewport-transform-action img {
-    width: 17dp;
-    height: 17dp;
+    width: 20dp;
+    height: 20dp;
+}
+
+.icon-btn.disabled,
+.icon-btn.disabled:hover,
+.icon-btn.disabled:active {
+    background-color: transparent;
+    border-color: transparent;
+}
+
+.icon-btn.disabled img {
+    image-color: rgba(255, 255, 255, 95);
 }
 
 .viewport-export-fields {

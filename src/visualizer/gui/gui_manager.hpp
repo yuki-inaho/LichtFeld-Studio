@@ -27,6 +27,7 @@
 #include "gui/startup_overlay.hpp"
 #include "gui/ui_context.hpp"
 #include "gui/utils/drag_drop_native.hpp"
+#include "rendering/cuda_vulkan_interop.hpp"
 #include "rendering/passes/vulkan_viewport_pass.hpp"
 #include "visualizer/app_store.hpp"
 #include "visualizer/gui/video_widget_interface.hpp"
@@ -129,8 +130,14 @@ namespace lfs::vis {
             bool isCapturingInput() const;
             bool isModalWindowOpen() const;
             [[nodiscard]] bool passiveMouseMoveNeedsRender(float mouse_x, float mouse_y) const;
+            [[nodiscard]] std::optional<double> secondsUntilTooltipReveal() const;
             [[nodiscard]] bool isStartupVisible() const { return startup_overlay_.isVisible(); }
+            [[nodiscard]] bool isStartupBlockingInput() const {
+                return startup_overlay_.blocksUnderlayInput();
+            }
             void dismissStartupOverlay();
+            void setStartupPluginLoadState(bool started, bool active, float progress,
+                                           const std::string& stage);
             void captureKey(int physical_key, int logical_key, int mods);
             void captureMouseButton(int button, int mods, double x, double y, std::optional<int> chord_key = std::nullopt);
             void captureMouseButtonRelease(int button);
@@ -204,6 +211,11 @@ namespace lfs::vis {
             void loadImGuiSettings();
             void saveImGuiSettings() const;
             void persistImGuiSettingsIfNeeded();
+            void beginImGuiPlatformFrame(WindowManager* window_manager,
+                                         VulkanContext* vulkan_context);
+            [[nodiscard]] bool shouldUseCachedImGuiResizeFrame(
+                const WindowManager* window_manager,
+                const VulkanContext* vulkan_context) const;
             void initCustomCursors();
             void destroyCustomCursors();
             void applyRmlCursorRequest(RmlCursorRequest req);
@@ -290,6 +302,7 @@ namespace lfs::vis {
             // Panel layout and viewport
             PanelLayoutManager panel_layout_;
             ViewportLayout viewport_layout_;
+            float menu_toolbar_right_edge_ = 0.0f;
             bool force_exit_ = false;
 
             std::unique_ptr<MenuBar> menu_bar_;
@@ -334,6 +347,7 @@ namespace lfs::vis {
 
             // Deferred CUDA version warning (emitted on first drawFrame)
             std::optional<lfs::core::CudaVersionInfo> pending_cuda_warning_;
+            bool cuda_unavailable_notified_ = false;
 
             // File association prompt (Windows only, one-shot)
             bool file_association_checked_ = false;
@@ -341,7 +355,11 @@ namespace lfs::vis {
 
             // RmlUI integration
             RmlUIManager rmlui_manager_;
+            std::chrono::steady_clock::time_point last_imgui_platform_frame_time_{};
+            std::uint64_t cached_imgui_resize_frame_count_ = 0;
+            bool used_cached_imgui_resize_frame_ = false;
             std::unique_ptr<lfs::vis::VulkanViewportPass> vulkan_viewport_pass_;
+            lfs::rendering::CudaVulkanUploadStream vulkan_interop_upload_stream_;
             std::vector<std::unique_ptr<VulkanSceneInteropTarget>> vulkan_scene_interop_;
             std::shared_ptr<const lfs::core::Tensor> vulkan_scene_image_;
             std::uint64_t vulkan_scene_image_generation_ = 0;
@@ -393,10 +411,12 @@ namespace lfs::vis {
             float last_ui_layout_scene_ratio_ = -1.0f;
             float last_ui_layout_python_console_w_ = -1.0f;
             float last_ui_layout_bottom_dock_h_ = -1.0f;
+            float last_ui_layout_left_dock_w_ = -1.0f;
             bool last_ui_layout_show_main_panel_ = false;
             bool last_ui_layout_ui_hidden_ = false;
             bool last_ui_layout_python_console_visible_ = false;
             bool last_ui_layout_bottom_dock_visible_ = false;
+            bool last_ui_layout_left_dock_visible_ = false;
             enum class RightPanelPointerRegion : uint8_t {
                 None,
                 Resize,
@@ -408,6 +428,8 @@ namespace lfs::vis {
             RightPanelPointerRegion right_panel_pointer_capture_region_ =
                 RightPanelPointerRegion::None;
             bool bottom_dock_pointer_live_capture_ = false;
+            bool left_dock_pointer_live_capture_ = false;
+            bool dock_resize_interaction_active_ = false;
             std::string last_ui_layout_active_tab_;
             std::uint64_t last_pre_scene_panel_sync_generation_ = 0;
 

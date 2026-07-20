@@ -21,6 +21,8 @@
 #include "window/window_manager.hpp"
 #include <cassert>
 #include <chrono>
+#include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -153,6 +155,12 @@ namespace lfs::vis {
         bool allowclose();
         void wakeMainLoop() const;
 
+        // Frame exception boundary. Contains an OOM or other error escaping a
+        // frame so the loop never aborts: OOM triggers one render-safe pressure
+        // episode, other errors escalate under a rate limit.
+        void handleFrameException(std::exception_ptr eptr) noexcept;
+        void onFrameCompleted() noexcept;
+
         // Event system
         void setupEventHandlers();
         void setupComponentConnections();
@@ -161,6 +169,9 @@ namespace lfs::vis {
         void handleLoadConfigFile(const std::filesystem::path& path);
         void handleNewProject();
         void performNewProject();
+        void schedulePendingTrainingAction();
+        void performPendingTrainingAction();
+        void requestApplicationClose();
         void handleSwitchToLatestCheckpoint();
         void performReset();
         void resetProjectState();
@@ -188,18 +199,30 @@ namespace lfs::vis {
             bool posted_work = false;
             bool render_work = false;
             bool store_dirty = false;
+            bool swapchain_resize_pending = false;
+            bool swapchain_resize_ready = false;
+            bool window_resize_paint_pending = false;
+            bool viewport_resize_deferring = false;
+            bool viewport_resize_settle_ready = false;
 
             [[nodiscard]] bool shouldRenderFrame() const {
                 return viewport_export_locked || scene_dirty || continuous_input ||
                        python_animation || python_overlay || python_redraw ||
                        gui_animation || input_event || posted_work || render_work ||
-                       store_dirty;
+                       store_dirty || swapchain_resize_ready || window_resize_paint_pending ||
+                       viewport_resize_settle_ready;
             }
 
             [[nodiscard]] bool needsContinuousLoop() const {
+                const bool resize_deferral_throttles_animation =
+                    viewport_resize_deferring ||
+                    (swapchain_resize_pending && !swapchain_resize_ready);
                 return scene_dirty || continuous_input || python_animation ||
-                       python_overlay || python_redraw || gui_animation ||
-                       render_work || viewport_export_locked || store_dirty;
+                       python_overlay || python_redraw ||
+                       (gui_animation && !resize_deferral_throttles_animation) ||
+                       render_work || viewport_export_locked || store_dirty ||
+                       swapchain_resize_ready || window_resize_paint_pending ||
+                       viewport_resize_settle_ready;
             }
         };
 
@@ -237,6 +260,11 @@ namespace lfs::vis {
         std::unique_ptr<ParameterManager> parameter_manager_;
         std::unique_ptr<MainLoop> main_loop_;
 
+        // Frame exception boundary state (viewer thread only).
+        int consecutive_oom_frames_ = 0;
+        uint64_t suppressed_frame_errors_ = 0;
+        std::chrono::steady_clock::time_point last_frame_error_log_{};
+
         // Tools
         std::shared_ptr<tools::AlignTool> align_tool_;
         std::shared_ptr<tools::SelectionTool> selection_tool_;
@@ -265,9 +293,20 @@ namespace lfs::vis {
         bool tools_initialized_ = false;
         bool view_context_bridge_initialized_ = false;
         bool pending_auto_train_ = false;
-        bool pending_new_project_ = false;
-        bool pending_reset_ = false;
+        enum class PendingTrainingAction : std::uint8_t {
+            None,
+            Reset,
+            NewProject,
+            Close,
+        };
+        PendingTrainingAction pending_training_action_ = PendingTrainingAction::None;
+        bool pending_training_action_posted_ = false;
+        int pending_training_completion_refresh_frames_ = 0;
         bool gui_frame_rendered_ = false;
+        bool startup_plugin_preload_started_ = false;
+        std::uint64_t startup_plugin_load_status_revision_ = 0;
+        bool plugin_preload_timing_active_ = false;
+        std::chrono::nanoseconds plugin_preload_max_update_stall_{};
         bool update_work_processed_ = false;
         std::chrono::high_resolution_clock::time_point last_frame_time_ = std::chrono::high_resolution_clock::now();
         bool sequencer_ui_initialized_ = false;

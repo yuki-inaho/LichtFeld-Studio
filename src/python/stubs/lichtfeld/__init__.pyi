@@ -244,7 +244,7 @@ def clear_scene() -> None:
 def switch_to_edit_mode() -> None:
     """Switch from training to edit mode"""
 
-def load_file(path: str, is_dataset: bool = False, output_path: str = '', init_path: str = '', centralize_dataset: str = 'off', max_width: int | None = None, apply_auto_crop: bool = False) -> None:
+def load_file(path: str, is_dataset: bool = False, output_path: str = '', init_path: str = '', centralize_dataset: str = 'off', max_width: int | None = None, apply_auto_crop: bool = False, min_track_length: int | None = None) -> None:
     """Load a file (PLY, checkpoint) or dataset into the scene."""
 
 def load_config_file(path: str) -> None:
@@ -261,7 +261,7 @@ def request_exit() -> None:
 def force_exit() -> None:
     """Force immediate application exit (bypasses confirmation)."""
 
-def export_scene(format: int, path: str, node_names: Sequence[str], sh_degree: int, rad_flip_y: bool = False) -> None:
+def export_scene(format: int, path: str, node_names: Sequence[str], sh_degree: int, rad_flip_y: bool = False, rad_streamable: bool = True) -> None:
     """
     Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec, 6=RAD, 7=COLMAP.
     """
@@ -433,7 +433,9 @@ def focus_selection() -> bool:
     """
 
 def get_camera_navigation_mode() -> str:
-    """Get the active camera navigation mode ('orbit', 'trackball', or 'fpv')"""
+    """
+    Get the active camera navigation mode ('orbit', 'trackball', 'fpv', or 'drone')
+    """
 
 def set_camera_navigation_mode(mode: str) -> None:
     """Set the active camera navigation mode"""
@@ -449,6 +451,9 @@ def toggle_fullscreen() -> None:
 
 def is_fullscreen() -> bool:
     """Check if the window is in fullscreen mode"""
+
+def get_vulkan_capabilities() -> dict:
+    """Return Vulkan device capabilities used to gate rendering controls"""
 
 def toggle_ui() -> None:
     """Toggle UI overlay visibility"""
@@ -1253,7 +1258,7 @@ def export_viewport_image(path: str, format: str = '', width: int = 0, height: i
         Dict with path, width, height, channels, format, and transparent.
     """
 
-def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0, bg_color: Tensor | None = None) -> Tensor | None:
+def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0, bg_color: Tensor | None = None, with_depth: bool = False, depth_mode: str = 'median') -> object:
     """
     Render scene from arbitrary camera parameters.
 
@@ -1264,9 +1269,14 @@ def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, 
         height: Render height in pixels
         fov: Vertical field of view in degrees (default: 60)
         bg_color: Accepted for compatibility; the Vulkan preview path uses current render settings
+        with_depth: If True, also return the per-pixel linear depth from the same render
+        depth_mode: "median" (default) = depth at 50% transmittance (sharp, undefined where
+            coverage < 50%); "expected" = alpha-weighted depth (dense/hole-free, softer at edges)
 
     Returns:
-        CPU Tensor [H, W, 3] RGB image, or None if no active visualizer scene is available
+        with_depth=False: CPU Tensor [H, W, 3] RGB image
+        with_depth=True: tuple (image [H, W, 3], depth [H, W]) of CPU float tensors
+        or None if no active visualizer scene is available
     """
 
 def render_view_u8(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0, bg_color: Tensor | None = None, orthographic: bool | None = None, ortho_scale: float | None = None) -> Tensor | None:
@@ -1766,7 +1776,9 @@ class MaskMode(enum.Enum):
 
     IGNORE = 2
 
-    ALPHA_CONSISTENT = 3
+    SEGMENT_AND_IGNORE = 3
+
+    ALPHA_CONSISTENT = 4
 
 class BackgroundMode(enum.Enum):
     SOLID_COLOR = 0
@@ -1905,15 +1917,6 @@ class OptimizationParams:
 
     @enable_eval.setter
     def enable_eval(self, arg: bool, /) -> None: ...
-
-    @property
-    def tile_mode(self) -> int:
-        """
-        Tile mode for 3DGUT training only (1, 2, or 4; ignored for 3DGS/FastGS)
-        """
-
-    @tile_mode.setter
-    def tile_mode(self, arg: int, /) -> None: ...
 
     @property
     def steps_scaler(self) -> float:
@@ -2072,10 +2075,49 @@ class OptimizationParams:
 
     @property
     def depth_loss_mode(self) -> str:
-        """Depth supervision mode: 'pearson' or 'adaptive-warped-l1'"""
+        """
+        Depth prior convention: 'ssi' (auto-detect), 'ssi-disparity', or 'ssi-depth'
+        """
 
     @depth_loss_mode.setter
     def depth_loss_mode(self, arg: str, /) -> None: ...
+
+    @property
+    def use_normal_loss(self) -> bool:
+        """Load normal maps and use normal-map supervision during training"""
+
+    @use_normal_loss.setter
+    def use_normal_loss(self, arg: bool, /) -> None: ...
+
+    @property
+    def normal_loss_weight(self) -> float:
+        """Weight for prior normal supervision"""
+
+    @normal_loss_weight.setter
+    def normal_loss_weight(self, arg: float, /) -> None: ...
+
+    @property
+    def normal_consistency_weight(self) -> float:
+        """Weight for depth-normal consistency supervision"""
+
+    @normal_consistency_weight.setter
+    def normal_consistency_weight(self, arg: float, /) -> None: ...
+
+    @property
+    def normal_flatten_weight(self) -> float:
+        """Min-axis scale flattening weight while normal supervision is active"""
+
+    @normal_flatten_weight.setter
+    def normal_flatten_weight(self, arg: float, /) -> None: ...
+
+    @property
+    def normal_loss_space(self) -> str:
+        """
+        Normal prior coordinate space: 'auto', 'camera-opencv', 'camera-opengl', or 'world'
+        """
+
+    @normal_loss_space.setter
+    def normal_loss_space(self, arg: str, /) -> None: ...
 
     @property
     def undistort(self) -> bool:
@@ -2182,6 +2224,13 @@ class DatasetParams:
     def max_width(self, arg: int, /) -> None: ...
 
     @property
+    def min_track_length(self) -> int:
+        """Minimum COLMAP sparse point track length; 0 disables filtering"""
+
+    @min_track_length.setter
+    def min_track_length(self, arg: int, /) -> None: ...
+
+    @property
     def use_cpu_cache(self) -> bool:
         """Cache images in CPU memory"""
 
@@ -2196,9 +2245,16 @@ class DatasetParams:
     def use_fs_cache(self, arg: bool, /) -> None: ...
 
     @property
+    def use_16bit_color(self) -> bool:
+        """Train with 16-bit color images (HDR); caches losslessly as JPEG 2000"""
+
+    @use_16bit_color.setter
+    def use_16bit_color(self, arg: bool, /) -> None: ...
+
+    @property
     def centralize_dataset(self) -> str:
         """
-        Dataset centralization mode used for the last load: 'none', 'auto', 'by_pointcloud', 'by_cameras'
+        Dataset centralization mode used for the last load: 'off', 'by_pointcloud', 'by_cameras'
         """
 
 def dataset_params() -> DatasetParams:

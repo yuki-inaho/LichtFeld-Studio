@@ -13,10 +13,6 @@ else()
     set(LFS_VIS_LIB_TYPE STATIC)
 endif()
 
-option(LFS_DEV_IMPORT_SOURCE_RESOURCES
-        "Load RmlUI resources and locales from source in non-portable builds"
-        ON)
-
 add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         # Core
         visualizer.cpp
@@ -42,6 +38,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         rendering/rendering_manager_vulkan.cpp
         rendering/rendering_manager_viewport.cpp
         rendering/lod_page_cache.cpp
+        rendering/lod_upload_engine.cpp
         rendering/spark_lod_controller.cpp
         rendering/split_view_composition.cpp
         rendering/split_view_service.cpp
@@ -85,7 +82,6 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/rml_status_bar.cpp
         gui/gpu_memory_query.cpp
         gui/line_renderer.cpp
-        gui/rml_overlay_context.cpp
         gui/film_strip_renderer.cpp
         gui/sequencer_ui_manager.cpp
         gui/rml_modal_overlay.cpp
@@ -239,7 +235,13 @@ target_link_libraries(lfs_visualizer
         CUDA::cudart
         nfd::nfd
         vterm
+        lfs_oiio
 )
+
+set_property(SOURCE
+    gui/gui_manager.cpp
+    rendering/passes/vulkan_environment_pass.cpp
+    APPEND PROPERTY COMPILE_DEFINITIONS FMT_HEADER_ONLY=1)
 
 # Linux folder pickers bypass NFD and call GTK directly so they can return
 # the currently-open folder rather than the highlighted child. Set up by
@@ -251,11 +253,17 @@ endif()
 target_sources(lfs_visualizer
         PRIVATE
         gui/rmlui/rmlui_vk_backend.cpp
+        rendering/lod_page_dequant_cuda.cu
         rendering/vksplat_input_packer.cpp
         rendering/vksplat_input_packer_cuda.cu
         rendering/vksplat_viewport_renderer.cpp
         rendering/vulkan_external_tensor.cpp
         rendering/point_cloud_vulkan_renderer.cpp)
+
+# The CPU chunk decoders round multiplies and adds separately; FMA contraction
+# in the dequant kernel would break CPU/GPU bit-parity (guarded by gtest).
+set_source_files_properties(rendering/lod_page_dequant_cuda.cu PROPERTIES
+        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
 set(glslang_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/glslang"
     CACHE PATH "Path to vcpkg-installed glslang config" FORCE)
 find_package(glslang CONFIG REQUIRED)
@@ -285,6 +293,7 @@ compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/textured_overla
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/textured_overlay.frag" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/textured_overlay.frag.spv.h" kTexturedOverlayFragSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/pivot.vert" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/pivot.vert.spv.h" kPivotVertSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/pivot.frag" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/pivot.frag.spv.h" kPivotFragSpv)
+compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/frustum.vert" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/frustum.vert.spv.h" kFrustumVertSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/mesh.vert" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/mesh.vert.spv.h" kMeshVertSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/mesh.frag" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/mesh.frag.spv.h" kMeshFragSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/mesh_shadow.vert" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/mesh_shadow.vert.spv.h" kMeshShadowVertSpv)
@@ -495,16 +504,32 @@ if(LFS_DEV_IMPORT_SOURCE_RESOURCES AND NOT BUILD_PORTABLE)
     message(STATUS "Resource dev mode: locales import from ${CMAKE_CURRENT_SOURCE_DIR}/gui/resources/locales")
 endif()
 
+if(LFS_ENABLE_VULKAN_VALIDATION)
+    if(WIN32)
+        set(_lfs_vulkan_validation_layer_dir
+                "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+    else()
+        set(_lfs_vulkan_validation_layer_dir
+                "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/vulkan/explicit_layer.d")
+    endif()
+    if(NOT EXISTS "${_lfs_vulkan_validation_layer_dir}/VkLayer_khronos_validation.json")
+        message(FATAL_ERROR
+                "Vulkan validation is enabled, but the pinned validation layer is missing from ${_lfs_vulkan_validation_layer_dir}")
+    endif()
+    set_property(SOURCE window/window_manager.cpp window/vulkan_context.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+            LFS_VULKAN_VALIDATION_LAYER_DIR="${_lfs_vulkan_validation_layer_dir}")
+    unset(_lfs_vulkan_validation_layer_dir)
+endif()
+
 # Compile definitions
 target_compile_definitions(lfs_visualizer PRIVATE
         LFS_VIS_EXPORTS
+        LFS_VULKAN_VALIDATION_DEFAULT=$<BOOL:${LFS_ENABLE_VULKAN_VALIDATION}>
         PROJECT_ROOT_PATH="${PROJECT_SOURCE_DIR}"
         VISUALIZER_ASSET_PATH="${VISUALIZER_BUILD_RESOURCE_DIR}/assets"
         VISUALIZER_LOCALE_PATH="${VISUALIZER_BUILD_RESOURCE_DIR}/locales"
         VISUALIZER_SOURCE_ASSET_PATH="${VISUALIZER_SOURCE_RESOURCE_DIR}/assets"
         ${LFS_VISUALIZER_DEV_RESOURCE_DEFINITIONS}
-        $<$<CONFIG:Debug>:DEBUG_BUILD>
-        $<$<CONFIG:Release>:RELEASE_BUILD>
 )
 
 # Platform-specific settings

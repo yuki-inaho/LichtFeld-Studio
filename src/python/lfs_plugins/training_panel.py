@@ -36,6 +36,11 @@ def tr(key):
     return result if result else key
 
 
+def tr_fallback(key, fallback):
+    result = lf.ui.tr(key)
+    return result if result and result != key else fallback
+
+
 class IterationRateTracker:
     WINDOW_SECONDS = 5.0
 
@@ -69,8 +74,8 @@ def _is_mrnf_strategy(strategy):
     return strategy in ("mrnf", "mnrf", "lfs")
 
 
-DEPTH_LOSS_MODE_VALUES = ("pearson", "adaptive-warped-l1")
-DEFAULT_DEPTH_LOSS_MODE = "adaptive-warped-l1"
+DEPTH_LOSS_MODE_VALUES = ("ssi", "ssi-disparity", "ssi-depth")
+DEFAULT_DEPTH_LOSS_MODE = "ssi"
 
 
 def _depth_loss_mode_or_default(mode):
@@ -106,6 +111,10 @@ LOCALE_KEYS = {
     "use_depth_loss": "training_params.use_depth_loss",
     "depth_loss_mode": "training_params.depth_loss_mode",
     "depth_loss_weight": "training_params.depth_loss_weight",
+    "use_normal_loss": "training_params.use_normal_loss",
+    "normal_loss_weight": "training_params.normal_loss_weight",
+    "normal_consistency_weight": "training_params.normal_consistency_weight",
+    "normal_flatten_weight": "training_params.normal_flatten_weight",
     "sparsity": "training_params.sparsity",
     "gut": "training_params.gut",
     "undistort": "training_params.undistort",
@@ -126,6 +135,7 @@ LOCALE_KEYS = {
     "max_width": "training.dataset.max_width",
     "cpu_cache": "training.dataset.cpu_cache",
     "fs_cache": "training.dataset.fs_cache",
+    "use_16bit_color": "training.dataset.use_16bit_color",
     "dataset_output": "training.dataset.output",
     "auto": "common.auto",
     "no_dataset": "training_panel.no_dataset_loaded",
@@ -186,16 +196,15 @@ LOCALE_KEYS = {
     "mask_none": "training.options.mask.none",
     "mask_segment": "training.options.mask.segment",
     "mask_ignore": "training.options.mask.ignore",
+    "mask_segment_and_ignore": "training.options.mask.segment_and_ignore",
     "mask_alpha_consistent": "training.options.mask.alpha_consistent",
-    "depth_loss_pearson": "training.options.depth_loss.pearson",
-    "depth_loss_adaptive_warped_l1": "training.options.depth_loss.adaptive_warped_l1",
+    "depth_loss_ssi": "training.options.depth_loss.ssi",
+    "depth_loss_ssi_disparity": "training.options.depth_loss.ssi_disparity",
+    "depth_loss_ssi_depth": "training.options.depth_loss.ssi_depth",
     "bg_option_color": "training.options.bg.color",
     "bg_option_modulation": "training.options.bg.modulation",
     "bg_option_image": "training.options.bg.image",
     "bg_option_random": "training.options.bg.random",
-    "bg_color_red_prefix": "training_panel.color_red_prefix",
-    "bg_color_green_prefix": "training_panel.color_green_prefix",
-    "bg_color_blue_prefix": "training_panel.color_blue_prefix",
     "enable_eval": "training_params.enable_eval",
     "test_every": "training.dataset.test_every",
 }
@@ -213,6 +222,7 @@ PARAM_BOOL_PROPS = [
     "invert_masks",
     "use_alpha_as_mask",
     "use_depth_loss",
+    "use_normal_loss",
     "enable_sparsity",
     "gut",
     "undistort",
@@ -226,7 +236,7 @@ PARAM_BOOL_PROPS = [
     "enable_eval",
 ]
 
-DATASET_BOOL_PROPS = ["use_cpu_cache", "use_fs_cache"]
+DATASET_BOOL_PROPS = ["use_cpu_cache", "use_fs_cache", "use_16bit_color"]
 
 # (prop, type, format, min, max)
 NUM_PROP_DEFS = [
@@ -254,6 +264,9 @@ NUM_PROP_DEFS = [
     ("mask_opacity_penalty_power", float, "%.3f", 0.5, None, 0.1),
     ("mask_threshold", float, "%.3f", 0, 1, 0.05),
     ("depth_loss_weight", float, "%.3f", 0, 100, 0.1),
+    ("normal_loss_weight", float, "%.3f", 0, 100, 0.01),
+    ("normal_consistency_weight", float, "%.3f", 0, 100, 0.01),
+    ("normal_flatten_weight", float, "%.3f", 0, 1000, 0.1),
     ("opacity_reg", float, "%.4f", 0, None, 0.001),
     ("scale_reg", float, "%.4f", 0, None, 0.001),
     ("tv_loss_weight", float, "%.1f", 0, None, 0.5),
@@ -371,22 +384,16 @@ INITIALLY_COLLAPSED = {
 }
 
 
-def _color_to_hex(c):
-    return f"#{int(c[0] * 255):02x}{int(c[1] * 255):02x}{int(c[2] * 255):02x}"
-
-
-def _hex_to_color(h):
-    h = h.lstrip("#")
-    if len(h) != 6:
-        return None
-    try:
-        return (
-            int(h[0:2], 16) / 255.0,
-            int(h[2:4], 16) / 255.0,
-            int(h[4:6], 16) / 255.0,
-        )
-    except ValueError:
-        return None
+BG_COLOR_CHANNELS = (
+    ("bg_color_r", 0),
+    ("bg_color_g", 1),
+    ("bg_color_b", 2),
+)
+BG_COLOR_CHANNEL_INDEX = dict(BG_COLOR_CHANNELS)
+BG_COLOR_HEX_KEY = "bg_color_hex"
+BG_COLOR_TEXT_KEYS = tuple(key for key, _index in BG_COLOR_CHANNELS) + (
+    BG_COLOR_HEX_KEY,
+)
 
 
 class TrainingPanel(Panel):
@@ -403,6 +410,8 @@ class TrainingPanel(Panel):
         self._checkpoint_saved_time = 0.0
         self._new_save_step = 7000
         self._auto_scaled_for_cameras = 0
+        self._auto_scale_steps_locked = True
+        self._auto_scale_scene_generation = RuntimeState.scene_generation.value
         self._last_state = ""
         self._last_save_steps = None
         self._color_edit_prop = None
@@ -501,6 +510,16 @@ class TrainingPanel(Panel):
         model.bind_func("label_status_error", lambda: tr("status.error"))
         model.bind_func("label_status_stopping", lambda: tr("status.stopping"))
         model.bind_func("label_ppisp_sidecar_clear", lambda: tr("training_panel.clear"))
+        model.bind_func(
+            "steps_scaling_lock_label", self._step_scaling_lock_label
+        )
+        model.bind_func(
+            "steps_scaling_lock_tooltip", self._step_scaling_lock_tooltip
+        )
+        model.bind_func("steps_scaling_lock_icon", self._step_scaling_lock_icon)
+        model.bind_func(
+            "steps_scaling_lock_selected", lambda: self._auto_scale_steps_locked
+        )
 
         def _btn_start():
             it = RuntimeState.iteration.value
@@ -560,11 +579,19 @@ class TrainingPanel(Panel):
         )
         model.bind_func(
             "dep_mask_segment",
-            lambda: p() is not None and p().has_params() and p().mask_mode.value == 1,
+            lambda: p() is not None and p().has_params() and (p().mask_mode.value == 1 or p().mask_mode.value == 3),
+        )
+        model.bind_func(
+            "dep_mask_threshold",
+            lambda: p() is not None and p().has_params() and p().mask_mode.value != 3,
         )
         model.bind_func(
             "dep_depth_loss",
             lambda: p() is not None and p().has_params() and p().use_depth_loss,
+        )
+        model.bind_func(
+            "dep_normal_loss",
+            lambda: p() is not None and p().has_params() and p().use_normal_loss,
         )
         model.bind_func(
             "dep_ppisp", lambda: p() is not None and p().has_params() and p().ppisp
@@ -679,6 +706,10 @@ class TrainingPanel(Panel):
         model.bind_func("struct_disabled", _params_edit_locked)
         model.bind_func("live_disabled", _params_edit_locked)
         model.bind_func("adv_disabled", _params_edit_locked)
+        model.bind_func(
+            "step_scaling_params_locked",
+            lambda: self._auto_scale_steps_locked,
+        )
         model.bind_func(
             "gut_disabled",
             lambda: p() is not None and p().has_params() and p().strategy == "igs+",
@@ -884,14 +915,10 @@ class TrainingPanel(Panel):
         return tuple(params.bg_color)
 
     def _restore_bg_color_snapshot(self, snapshot):
-        params = lf.optimization_params()
-        if not params or not params.has_params():
-            return
         color = tuple(snapshot or (0.0, 0.0, 0.0))
-        params.bg_color = color
-        rs = lf.get_render_settings()
-        if rs:
-            rs.set("background_color", color)
+        if not self._set_training_bg_color(color):
+            return
+        self._sync_bg_color_text_bufs()
         if self._handle:
             self._handle.dirty_all()
 
@@ -924,9 +951,21 @@ class TrainingPanel(Panel):
         if key == "new_step_str":
             return f"{self._new_save_step:,}"
 
+        if key == BG_COLOR_HEX_KEY:
+            if p and p.has_params():
+                return w.color_to_hex(p.bg_color)
+            return "#000000"
+
+        for channel_key, channel_index in BG_COLOR_CHANNELS:
+            if key == channel_key:
+                if p and p.has_params():
+                    return w.color_channel_text(p.bg_color, channel_index)
+                return "0"
+
         return None
 
     def _commit_number_input_key(self, key):
+        original = self._text_bufs.get(key)
         buf_val = self._text_bufs.get(key)
         if buf_val is not None and buf_val.strip() and key.endswith("_str"):
             prop = key[:-4]
@@ -946,8 +985,27 @@ class TrainingPanel(Panel):
         canonical = self._canonical_text_buf_value(key)
         if canonical is None:
             return
-        if self._text_bufs.get(key) != canonical:
+        if original != canonical:
             self._text_bufs[key] = canonical
+            self._mark_text_buf_dirty(key)
+
+    def _commit_bg_color_text_key(self, key):
+        buf_val = self._text_bufs.get(key)
+        updated = False
+        if buf_val is not None and str(buf_val).strip():
+            if key == BG_COLOR_HEX_KEY:
+                updated = self._set_bg_color_hex(buf_val)
+            elif key in BG_COLOR_CHANNEL_INDEX:
+                updated = self._set_bg_color_channel(key, buf_val)
+
+        canonical = self._canonical_text_buf_value(key)
+        if canonical is None:
+            return
+        self._text_bufs[key] = canonical
+        if updated:
+            self._sync_bg_color_text_bufs()
+            self._dirty_bg_color_bindings()
+        else:
             self._mark_text_buf_dirty(key)
 
     def _sync_text_bufs(self):
@@ -973,6 +1031,25 @@ class TrainingPanel(Panel):
             f"{d.test_every:,}" if d and d.has_params() else "8"
         )
         self._text_bufs["new_step_str"] = f"{self._new_save_step:,}"
+        self._sync_bg_color_text_bufs(p)
+
+    def _sync_bg_color_text_bufs(self, params=None):
+        if params is None:
+            params = lf.optimization_params()
+        color = (
+            params.bg_color
+            if params and params.has_params()
+            else (0.0, 0.0, 0.0)
+        )
+        for key, channel_index in BG_COLOR_CHANNELS:
+            self._text_bufs[key] = w.color_channel_text(color, channel_index)
+        self._text_bufs[BG_COLOR_HEX_KEY] = w.color_to_hex(color)
+
+    def _dirty_bg_color_bindings(self):
+        if not self._handle:
+            return
+        for key in BG_COLOR_TEXT_KEYS:
+            self._handle.dirty(key)
 
     def _bind_slider_props(self, model, p):
         for prop in SLIDER_PROPS:
@@ -992,26 +1069,33 @@ class TrainingPanel(Panel):
                 else (0, 0, 0)
             )
 
-        model.bind_func(
-            "bg_color_r",
-            lambda: f"{tr('training_panel.color_red_prefix')}{int(_bg()[0] * 255):>3d}",
-        )
-        model.bind_func(
-            "bg_color_g",
-            lambda: (
-                f"{tr('training_panel.color_green_prefix')}{int(_bg()[1] * 255):>3d}"
-            ),
-        )
-        model.bind_func(
-            "bg_color_b",
-            lambda: (
-                f"{tr('training_panel.color_blue_prefix')}{int(_bg()[2] * 255):>3d}"
-            ),
-        )
+        for key, channel_index in BG_COLOR_CHANNELS:
+            self._text_bufs[key] = None
+
+            def getter(k=key, idx=channel_index):
+                if self._text_bufs[k] is None:
+                    self._text_bufs[k] = w.color_channel_text(_bg(), idx)
+                return self._text_bufs[k]
+
+            def setter(v, k=key):
+                self._text_bufs[k] = str(v)
+
+            model.bind(key, getter, setter)
+
+        self._text_bufs[BG_COLOR_HEX_KEY] = None
+
+        def hex_getter():
+            if self._text_bufs[BG_COLOR_HEX_KEY] is None:
+                self._text_bufs[BG_COLOR_HEX_KEY] = w.color_to_hex(_bg())
+            return self._text_bufs[BG_COLOR_HEX_KEY]
+
+        def hex_setter(v):
+            self._text_bufs[BG_COLOR_HEX_KEY] = str(v)
+
         model.bind(
-            "bg_color_hex",
-            lambda: _color_to_hex(_bg()),
-            lambda v: self._set_bg_color_hex(v),
+            BG_COLOR_HEX_KEY,
+            hex_getter,
+            hex_setter,
         )
 
         model.bind_func(
@@ -1131,6 +1215,29 @@ class TrainingPanel(Panel):
         model.bind_event("action", self._on_action)
         model.bind_event("remove_step", self._on_remove_step_event)
         model.bind_event("num_step", self._on_num_step)
+        model.bind_event(
+            "toggle_step_scaling_lock", self._on_step_scaling_lock_toggle
+        )
+
+    def _step_scaling_lock_label(self):
+        if self._auto_scale_steps_locked:
+            return tr_fallback("training.step_scaling.locked", "Auto")
+        return tr_fallback("training.step_scaling.unlocked", "Manual")
+
+    def _step_scaling_lock_tooltip(self):
+        if self._auto_scale_steps_locked:
+            return tr_fallback(
+                "training.tooltip.step_scaling_locked",
+                "Auto-scales relevant training parameters.",
+            )
+        return tr_fallback(
+            "training.tooltip.step_scaling_unlocked",
+            "Manual: training parameters are not auto-scaled.",
+        )
+
+    def _step_scaling_lock_icon(self):
+        state = "locked" if self._auto_scale_steps_locked else "unlocked"
+        return f"../icon/scene/{state}.png"
 
     def on_mount(self, doc):
         self._doc = doc
@@ -1165,6 +1272,21 @@ class TrainingPanel(Panel):
                     self._capture_bg_color_snapshot,
                     self._restore_bg_color_snapshot,
                 )
+                el.add_event_listener("change", self._on_bg_color_hex_change)
+                el.add_event_listener("blur", self._on_bg_color_hex_blur)
+        for el in doc.query_selector_all("input.color-channel"):
+            key = el.get_attribute("data-value", "")
+            if key not in BG_COLOR_CHANNEL_INDEX:
+                continue
+            w.bind_select_all_on_focus(el)
+            self._escape_revert.bind(
+                el,
+                key,
+                self._capture_bg_color_snapshot,
+                self._restore_bg_color_snapshot,
+            )
+            el.add_event_listener("change", self._on_color_channel_input_change)
+            el.add_event_listener("blur", self._on_color_channel_input_blur)
         sidecar_input = doc.query_selector('input[data-value="ppisp_sidecar_path"]')
         if sidecar_input:
             w.bind_select_all_on_focus(sidecar_input)
@@ -1198,6 +1320,14 @@ class TrainingPanel(Panel):
             RuntimeState.language_generation,
         )
         self._reactive_binding.set_handle(self._handle).watch(*native_signals)
+
+    def _sync_auto_scale_scene_generation(self):
+        scene_generation = RuntimeState.scene_generation.value
+        if scene_generation == self._auto_scale_scene_generation:
+            return False
+        self._auto_scale_scene_generation = scene_generation
+        self._auto_scaled_for_cameras = 0
+        return True
 
     def _unsubscribe_reactive_state(self):
         self._reactive_binding.close()
@@ -1261,6 +1391,7 @@ class TrainingPanel(Panel):
         if not self._handle:
             return False
         self._sync_panel_label()
+        self._sync_auto_scale_scene_generation()
 
         dirty = False
         state = RuntimeState.trainer_state.value
@@ -1363,13 +1494,20 @@ class TrainingPanel(Panel):
         if c == self._last_bg_color:
             return False
         self._last_bg_color = c
+        self._sync_render_background_to_training(params)
+        self._sync_bg_color_text_bufs(params)
         swatch = doc.get_element_by_id("swatch-bg_color")
         if swatch:
-            r, g, b = int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)
+            r = w.color_channel_byte(c, 0)
+            g = w.color_channel_byte(c, 1)
+            b = w.color_channel_byte(c, 2)
             swatch.set_property("background-color", f"rgb({r},{g},{b})")
+        if self._handle:
+            self._dirty_bg_color_bindings()
         return True
 
     def on_scene_changed(self, doc):
+        self._sync_render_background_to_training()
         if self._handle:
             self._sync_text_bufs()
             self._handle.dirty_all()
@@ -1473,10 +1611,10 @@ class TrainingPanel(Panel):
         r = float(event.get_parameter("red", "0"))
         g = float(event.get_parameter("green", "0"))
         b = float(event.get_parameter("blue", "0"))
-        setattr(params, self._color_edit_prop, (r, g, b))
-        rs = lf.get_render_settings()
-        if rs and self._color_edit_prop == "bg_color":
-            rs.set("background_color", (r, g, b))
+        if self._color_edit_prop == "bg_color":
+            self._set_training_bg_color((r, g, b))
+        else:
+            setattr(params, self._color_edit_prop, (r, g, b))
         if self._handle:
             self._sync_text_bufs()
             self._handle.dirty_all()
@@ -1502,6 +1640,23 @@ class TrainingPanel(Panel):
             rs.set("raster_backend", "3dgut" if val else "3dgs")
             return
         rs.set(prop, val)
+
+    def _set_training_bg_color(self, color):
+        params = lf.optimization_params()
+        if not params or not params.has_params():
+            return False
+        normalized = w.normalize_color(color)
+        params.bg_color = normalized
+        self._sync_render_setting("background_color", normalized)
+        return True
+
+    def _sync_render_background_to_training(self, params=None):
+        if params is None:
+            params = lf.optimization_params()
+        if not params or not params.has_params():
+            return False
+        self._sync_render_setting("background_color", w.normalize_color(params.bg_color))
+        return True
 
     def _set_bool_prop(self, prop, val):
         params = lf.optimization_params()
@@ -1634,10 +1789,34 @@ class TrainingPanel(Panel):
                 if self._handle:
                     self._sync_text_bufs()
                     self._handle.dirty_all()
+            elif prop == "iterations":
+                return self._set_iterations(params, val)
             else:
                 params.set(prop, val)
         except (ValueError, TypeError, RuntimeError):
             return False
+        return True
+
+    def _set_iterations(self, params, val):
+        if val <= 0:
+            return False
+        if not self._auto_scale_steps_locked:
+            params.iterations = val
+            return True
+
+        current = max(1, int(getattr(params, "iterations", 0)))
+        if current == val:
+            return True
+
+        current_scaler = float(getattr(params, "steps_scaler", 1.0))
+        if current_scaler <= 0.0:
+            current_scaler = 1.0
+        next_scaler = current_scaler * (float(val) / float(current))
+        params.apply_step_scaling(next_scaler)
+        params.iterations = val
+        if self._handle:
+            self._sync_text_bufs()
+            self._handle.dirty_all()
         return True
 
     def _set_ppisp_activation_step(self, val_str):
@@ -1760,18 +1939,24 @@ class TrainingPanel(Panel):
         self._set_slider_prop(prop, value)
 
     def _set_bg_color_hex(self, hex_val):
+        color = w.hex_to_color(hex_val)
+        if color is not None and self._set_training_bg_color(color):
+            return True
+        return False
+
+    def _set_bg_color_channel(self, key, val_str):
         params = lf.optimization_params()
         if not params or not params.has_params():
-            return
-        color = _hex_to_color(hex_val)
-        if color:
-            params.bg_color = color
-            rs = lf.get_render_settings()
-            if rs:
-                rs.set("background_color", color)
-            if self._handle:
-                self._sync_text_bufs()
-                self._handle.dirty_all()
+            return False
+        parsed = w.parse_color_channel(val_str)
+        if parsed is None:
+            return False
+        channel_index = BG_COLOR_CHANNEL_INDEX.get(key)
+        if channel_index is None:
+            return False
+        color = list(w.normalize_color(params.bg_color))
+        color[channel_index] = parsed
+        return self._set_training_bg_color(color)
 
     # ── Event handlers ─────────────────────────────────────
 
@@ -1801,6 +1986,31 @@ class TrainingPanel(Panel):
         if target is None:
             return
         self._commit_number_input_key(target.get_attribute("data-value", ""))
+
+    def _on_color_channel_input_change(self, event):
+        if not event.get_bool_parameter("linebreak", False):
+            return
+        target = event.current_target()
+        if target is None:
+            return
+        self._commit_bg_color_text_key(target.get_attribute("data-value", ""))
+
+    def _on_color_channel_input_blur(self, event):
+        target = event.current_target()
+        if target is None:
+            return
+        self._commit_bg_color_text_key(target.get_attribute("data-value", ""))
+
+    def _on_bg_color_hex_change(self, event):
+        if not event.get_bool_parameter("linebreak", False):
+            return
+        self._commit_bg_color_text_key(BG_COLOR_HEX_KEY)
+
+    def _on_bg_color_hex_blur(self, event):
+        self._commit_bg_color_text_key(BG_COLOR_HEX_KEY)
+
+    def _on_step_scaling_lock_toggle(self, *_args):
+        self._set_auto_scale_steps_locked(not self._auto_scale_steps_locked)
 
     def _apply_num_step(self, prop, direction):
         entry = _NUM_PROP_LOOKUP.get(prop)
@@ -2143,6 +2353,9 @@ class TrainingPanel(Panel):
         params.remove_eval_step(step)
 
     def _try_auto_scale_steps(self, params):
+        self._sync_auto_scale_scene_generation()
+        if not self._auto_scale_steps_locked:
+            return False
         scene = lf.get_scene()
         if scene is None:
             return False
@@ -2153,1362 +2366,17 @@ class TrainingPanel(Panel):
         params.auto_scale_steps(camera_count)
         return True
 
-    def _draw_controls(self, layout, state, iteration):
-        if state == "ready":
-            label = (
-                tr("training_panel.resume_training")
-                if iteration > 0
-                else tr("training_panel.start_training")
-            )
-            if layout.button_styled(label, "success", FULL_WIDTH):
-                params = lf.optimization_params()
-                error = params.validate() if params.has_params() else ""
-                if error:
-                    btn_mcmc = tr("training.conflict.btn_use_mcmc")
-                    btn_gut = tr("training.conflict.btn_disable_gut")
-                    btn_cancel = tr("training.conflict.btn_cancel")
-
-                    def _on_start_conflict(button, _mcmc=btn_mcmc, _gut=btn_gut):
-                        p = lf.optimization_params()
-                        if button == _mcmc:
-                            p.set_strategy("mcmc")
-                            lf.start_training()
-                        elif button == _gut:
-                            p.gut = False
-                            lf.start_training()
-
-                    lf.ui.confirm_dialog(
-                        tr("training.error.strategy_gut_title"),
-                        tr("training.conflict.strategy_gut_start_message"),
-                        [btn_mcmc, btn_gut, btn_cancel],
-                        _on_start_conflict,
-                    )
-                else:
-                    lf.start_training()
-            if iteration > 0:
-                if layout.button_styled(
-                    tr("training_panel.reset"), "secondary", FULL_WIDTH
-                ):
-                    lf.reset_training()
-            if layout.button_styled(tr("training_panel.clear"), "error", FULL_WIDTH):
-                lf.new_project()
-
-        elif state == "running":
-            if layout.button_styled(tr("training_panel.pause"), "warning", FULL_WIDTH):
-                lf.pause_training()
-
-        elif state == "paused":
-            if layout.button_styled(tr("training_panel.resume"), "success", FULL_WIDTH):
-                lf.resume_training()
-            if layout.button_styled(
-                tr("training_panel.reset"), "secondary", FULL_WIDTH
-            ):
-                lf.reset_training()
-            if layout.button_styled(tr("training_panel.stop"), "error", FULL_WIDTH):
-                lf.stop_training()
-
-        elif state in ("completed", "stopped"):
-            if state == "completed":
-                layout.text_colored(tr("status.complete"), COLOR_SUCCESS)
-            else:
-                layout.text_colored(tr("status.stopped"), COLOR_MUTED)
-            if layout.button_styled(
-                tr("training_panel.switch_edit_mode"), "success", FULL_WIDTH
-            ):
-                lf.switch_to_edit_mode()
-            if layout.button_styled(
-                tr("training_panel.reset"), "secondary", FULL_WIDTH
-            ):
-                lf.reset_training()
-            if layout.button_styled(tr("training_panel.clear"), "error", FULL_WIDTH):
-                lf.new_project()
-
-        elif state == "error":
-            layout.text_colored(tr("status.error"), COLOR_ERROR)
-            if error_msg := lf.trainer_error():
-                layout.text_wrapped(error_msg)
-            if layout.button_styled(
-                tr("training_panel.reset"), "secondary", FULL_WIDTH
-            ):
-                lf.reset_training()
-            if layout.button_styled(tr("training_panel.clear"), "error", FULL_WIDTH):
-                lf.new_project()
-
-        elif state == "stopping":
-            layout.text_colored(tr("status.stopping"), COLOR_MUTED)
-
-        if state in ("running", "paused"):
-            if layout.button_styled(
-                tr("training_panel.save_checkpoint"), "primary", FULL_WIDTH
-            ):
-                lf.save_checkpoint()
-                self._mark_checkpoint_saved()
-
-            if time.time() - self._checkpoint_saved_time < 2.0:
-                theme = lf.ui.theme()
-                layout.text_colored(
-                    tr("training_panel.checkpoint_saved"), theme.palette.success
-                )
-
-    def _draw_basic_params(self, layout, state, iteration, params):
-        can_edit = (state == "ready") and (iteration == 0)
-        can_edit_live = state in ("ready", "running", "paused")
-
-        if layout.begin_table("PyBasicParamsTable", 2):
-            layout.table_setup_column(tr("common.column_label"), 120.0)
-            layout.table_setup_column(tr("common.column_control"), 0.0)
-
-            # -- Structural params (only before training starts) --
-            layout.begin_disabled(not can_edit)
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.strategy"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            strategy_items = [
-                tr("training.options.strategy.mrnf"),
-                tr("training.options.strategy.igs_plus"),
-                tr("training.options.strategy.mcmc"),
-            ]
-            strategy_map = {0: "mrnf", 1: "igs+", 2: "mcmc"}
-            strategy_idx = {"mrnf": 0, "mnrf": 0, "lfs": 0, "igs+": 1, "mcmc": 2}.get(
-                params.strategy, 0
-            )
-            changed, new_idx = layout.combo(
-                "##py_strategy", strategy_idx, strategy_items
-            )
-            if changed:
-                new_strategy = strategy_map[new_idx]
-                if new_strategy == "igs+" and params.gut:
-                    btn_gut = tr("training.conflict.btn_disable_gut")
-                    btn_cancel = tr("training.conflict.btn_cancel")
-
-                    def _on_strategy_conflict(
-                        button, _gut=btn_gut, _strategy=new_strategy
-                    ):
-                        p = lf.optimization_params()
-                        if button == _gut:
-                            p.gut = False
-                            p.set_strategy(_strategy)
-
-                    lf.ui.confirm_dialog(
-                        tr("training.error.strategy_gut_title"),
-                        tr("training.conflict.strategy_gut_strategy_message"),
-                        [btn_gut, btn_cancel],
-                        _on_strategy_conflict,
-                    )
-                else:
-                    params.set_strategy(new_strategy)
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                tooltip = (
-                    tr("training.tooltip.strategy_gut_conflict")
-                    if params.gut
-                    else tr("training.tooltip.strategy")
-                )
-                layout.set_tooltip(tooltip)
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.iterations"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            changed, new_val = layout.input_int_formatted(
-                "##py_iterations", int(params.iterations), 1000, 5000
-            )
-            if changed and new_val > 0:
-                params.iterations = new_val
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.iterations"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.max_gaussians"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            changed, new_val = layout.input_int_formatted(
-                "##py_max_cap", params.max_cap, 10000, 100000
-            )
-            if changed and new_val > 0:
-                params.max_cap = new_val
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.max_gaussians"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.sh_degree"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            changed, new_idx = layout.combo(
-                "##py_sh_degree", params.sh_degree, SH_DEGREE_ITEMS
-            )
-            if changed:
-                params.sh_degree = new_idx
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.sh_degree"))
-
-            if params.gut:
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.tile_mode"))
-                layout.table_next_column()
-                layout.push_item_width(-1)
-                tile_idx = {1: 0, 2: 1, 4: 2}.get(params.tile_mode, 0)
-                tile_mode_items = [
-                    tr("training.options.tile.full"),
-                    tr("training.options.tile.half"),
-                    tr("training.options.tile.quarter"),
-                ]
-                changed, new_idx = layout.combo(
-                    "##py_tile_mode", tile_idx, tile_mode_items
-                )
-                if changed:
-                    params.tile_mode = [1, 2, 4][new_idx]
-                layout.pop_item_width()
-                if layout.is_item_hovered():
-                    layout.set_tooltip(tr("training.tooltip.tile_mode"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.steps_scaler"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            changed, new_val = layout.input_float(
-                "##py_steps_scaler", params.steps_scaler, 0.1, 0.5, "%.2f"
-            )
-            if changed:
-                params.apply_step_scaling(new_val)
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.steps_scaler"))
-
-            layout.end_disabled()
-
-            # -- Live-editable params (available during training) --
-            layout.begin_disabled(not can_edit_live)
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.bilateral_grid"))
-            layout.table_next_column()
-            changed, new_val = layout.checkbox(
-                "##py_bilateral_grid", params.use_bilateral_grid
-            )
-            if changed:
-                params.use_bilateral_grid = new_val
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.bilateral_grid"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.mask_mode"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            mask_idx = params.mask_mode.value
-            mask_mode_items = [
-                tr("training.options.mask.none"),
-                tr("training.options.mask.segment"),
-                tr("training.options.mask.ignore"),
-                tr("training.options.mask.alpha_consistent"),
-            ]
-            changed, new_idx = layout.combo("##py_mask_mode", mask_idx, mask_mode_items)
-            if changed:
-                params.mask_mode = lf.MaskMode(new_idx)
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.mask_mode"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.use_depth_loss"))
-            layout.table_next_column()
-            changed, new_val = layout.checkbox(
-                "##py_use_depth_loss", params.use_depth_loss
-            )
-            if changed:
-                params.use_depth_loss = new_val
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.use_depth_loss"))
-
-            if params.use_depth_loss:
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.depth_loss_mode"))
-                layout.table_next_column()
-                layout.push_item_width(-1)
-                depth_loss_mode = _depth_loss_mode_or_default(params.depth_loss_mode)
-                depth_loss_mode_idx = DEPTH_LOSS_MODE_VALUES.index(depth_loss_mode)
-                depth_loss_mode_items = [
-                    tr("training.options.depth_loss.pearson"),
-                    tr("training.options.depth_loss.adaptive_warped_l1"),
-                ]
-                changed, new_idx = layout.combo(
-                    "##py_depth_loss_mode",
-                    depth_loss_mode_idx,
-                    depth_loss_mode_items,
-                )
-                if changed and 0 <= new_idx < len(DEPTH_LOSS_MODE_VALUES):
-                    params.depth_loss_mode = DEPTH_LOSS_MODE_VALUES[new_idx]
-                layout.pop_item_width()
-                if layout.is_item_hovered():
-                    layout.set_tooltip(tr("training.tooltip.depth_loss_mode"))
-
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.depth_loss_weight"))
-                layout.table_next_column()
-                layout.push_item_width(-1)
-                changed, new_val = layout.input_float(
-                    "##py_depth_loss_weight",
-                    params.depth_loss_weight,
-                    0.1,
-                    0.5,
-                    "%.3f",
-                )
-                if changed:
-                    params.depth_loss_weight = max(0.0, new_val)
-                layout.pop_item_width()
-                if layout.is_item_hovered():
-                    layout.set_tooltip(tr("training.tooltip.depth_loss_weight"))
-
-            if params.mask_mode.value != 0:
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.invert_masks"))
-                layout.table_next_column()
-                changed, new_val = layout.checkbox(
-                    "##py_invert_masks", params.invert_masks
-                )
-                if changed:
-                    params.invert_masks = new_val
-                if layout.is_item_hovered():
-                    layout.set_tooltip(tr("training.tooltip.invert_masks"))
-
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.use_alpha_as_mask"))
-                layout.table_next_column()
-                changed, new_val = layout.checkbox(
-                    "##py_use_alpha_as_mask", params.use_alpha_as_mask
-                )
-                if changed:
-                    params.use_alpha_as_mask = new_val
-                if layout.is_item_hovered():
-                    layout.set_tooltip(tr("training.tooltip.use_alpha_as_mask"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.sparsity"))
-            layout.table_next_column()
-            changed, new_val = layout.checkbox("##py_sparsity", params.enable_sparsity)
-            if changed:
-                params.enable_sparsity = new_val
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.sparsity"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.gut"))
-            layout.table_next_column()
-            gut_disabled = params.strategy == "igs+"
-            if gut_disabled:
-                layout.begin_disabled(True)
-            changed, new_val = layout.checkbox("##py_gut", params.gut)
-            if changed:
-                params.gut = new_val
-                self._sync_render_setting("gut", new_val)
-            if gut_disabled:
-                layout.end_disabled()
-            if layout.is_item_hovered():
-                tooltip = (
-                    tr("training.tooltip.gut_strategy_conflict")
-                    if gut_disabled
-                    else tr("training.tooltip.gut")
-                )
-                layout.set_tooltip(tooltip)
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.undistort"))
-            layout.table_next_column()
-            changed, new_val = layout.checkbox("##py_undistort", params.undistort)
-            if changed:
-                params.undistort = new_val
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.undistort"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.mip_filter"))
-            layout.table_next_column()
-            changed, new_val = layout.checkbox("##py_mip_filter", params.mip_filter)
-            if changed:
-                params.mip_filter = new_val
-                self._sync_render_setting("mip_filter", new_val)
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.mip_filter"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.ppisp"))
-            layout.table_next_column()
-            changed, new_val = layout.checkbox("##py_ppisp", params.ppisp)
-            if changed:
-                params.ppisp = new_val
-                self._sync_render_setting("apply_appearance_correction", new_val)
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.ppisp"))
-
-            if params.ppisp:
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.ppisp_controller"))
-                layout.table_next_column()
-                changed, new_val = layout.checkbox(
-                    "##py_ppisp_controller", params.ppisp_use_controller
-                )
-                if changed:
-                    params.ppisp_use_controller = new_val
-                if layout.is_item_hovered():
-                    layout.set_tooltip(tr("training.tooltip.ppisp_controller"))
-
-                if params.ppisp_use_controller:
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.label(tr("training_params.ppisp_activation_step"))
-                    layout.table_next_column()
-                    is_auto = params.ppisp_controller_activation_step < 0
-                    changed, new_auto = layout.checkbox(
-                        f"{tr('common.auto')}##py_ppisp_auto_step", is_auto
-                    )
-                    if changed:
-                        params.ppisp_controller_activation_step = (
-                            -1 if new_auto else max(1, int(params.iterations) - 5000)
-                        )
-                    if not is_auto:
-                        layout.same_line()
-                        layout.push_item_width(-1)
-                        changed, new_val = layout.input_int_formatted(
-                            "##py_ppisp_ctrl_step",
-                            params.ppisp_controller_activation_step,
-                            1000,
-                            5000,
-                        )
-                        if changed:
-                            params.ppisp_controller_activation_step = max(1, new_val)
-                        layout.pop_item_width()
-                    if layout.is_item_hovered():
-                        layout.set_tooltip(tr("training.tooltip.ppisp_activation_step"))
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.label(tr("training_params.ppisp_controller_lr"))
-                    layout.table_next_column()
-                    layout.push_item_width(-1)
-                    changed, new_val = layout.input_float(
-                        "##py_ppisp_ctrl_lr",
-                        params.ppisp_controller_lr,
-                        0.0001,
-                        0.001,
-                        "%.5f",
-                    )
-                    if changed:
-                        params.ppisp_controller_lr = new_val
-                    layout.pop_item_width()
-                    if layout.is_item_hovered():
-                        layout.set_tooltip(tr("training.tooltip.ppisp_controller_lr"))
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.label(tr("training_params.ppisp_freeze_gaussians"))
-                    layout.table_next_column()
-                    changed, new_val = layout.checkbox(
-                        "##py_ppisp_freeze", params.ppisp_freeze_gaussians
-                    )
-                    if changed:
-                        params.ppisp_freeze_gaussians = new_val
-                    if layout.is_item_hovered():
-                        layout.set_tooltip(
-                            tr("training.tooltip.ppisp_freeze_gaussians")
-                        )
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.bg_mode"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            bg_idx = params.bg_mode.value
-            bg_mode_items = [
-                tr("training.options.bg.color"),
-                tr("training.options.bg.modulation"),
-                tr("training.options.bg.image"),
-                tr("training.options.bg.random"),
-            ]
-            changed, new_idx = layout.combo("##py_bg_mode", bg_idx, bg_mode_items)
-            if changed:
-                params.bg_mode = lf.BackgroundMode(new_idx)
-            layout.pop_item_width()
-
-            bg_mode_val = params.bg_mode.value
-            if bg_mode_val in (0, 1):
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.bg_color"))
-                layout.table_next_column()
-                layout.push_item_width(-1)
-                changed, new_color = layout.color_edit3(
-                    "##py_bg_color", params.bg_color
-                )
-                if changed:
-                    params.bg_color = new_color
-                    self._sync_render_setting("background_color", new_color)
-                layout.pop_item_width()
-
-            if bg_mode_val == 2:
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.label(tr("training_params.bg_image"))
-                layout.table_next_column()
-                layout.push_item_width(-1)
-                img_path = params.bg_image_path
-                display = (
-                    os.path.basename(img_path)
-                    if img_path
-                    else tr("training.value.none")
-                )
-                layout.label(display)
-                layout.pop_item_width()
-
-                layout.table_next_row()
-                layout.table_next_column()
-                layout.table_next_column()
-                if layout.button(
-                    tr("training_params.bg_image_browse") + "##py_bg_browse"
-                ):
-                    selected = lf.ui.open_image_dialog("")
-                    if selected:
-                        params.bg_image_path = selected
-                layout.same_line()
-                if img_path and layout.button(
-                    tr("training_params.bg_image_clear") + "##py_bg_clear"
-                ):
-                    params.bg_image_path = ""
-
-            layout.end_disabled()
-            layout.end_table()
-
-    def _draw_advanced_params(self, layout, state, iteration, params):
-        can_edit = (state == "ready") and (iteration == 0)
-        dataset = lf.dataset_params()
-        dataset_can_edit = dataset.can_edit() if dataset.has_params() else False
-
-        if layout.tree_node(tr("training.section.dataset") + "##py"):
-            table_open = False
-            try:
-                if dataset.has_params():
-                    table_open = layout.begin_table("PyDatasetTable", 2)
-                    if table_open:
-                        layout.table_setup_column(tr("common.column_label"), 120.0)
-                        layout.table_setup_column(tr("common.column_control"), 0.0)
-
-                        data_path = dataset.data_path
-                        self._table_text(
-                            layout,
-                            tr("training.dataset.path"),
-                            os.path.basename(data_path)
-                            if data_path
-                            else tr("training.value.none"),
-                        )
-
-                        images = dataset.images
-                        self._table_text(
-                            layout,
-                            tr("training.dataset.images"),
-                            images if images else tr("training.value.default"),
-                        )
-
-                        layout.table_next_row()
-                        layout.table_next_column()
-                        layout.label(tr("training.dataset.resize_factor"))
-                        layout.table_next_column()
-                        if dataset_can_edit:
-                            layout.push_item_width(-1)
-                            resize_options = [-1, 1, 2, 4, 8]
-                            resize_labels = [tr("common.auto"), "1", "2", "4", "8"]
-                            current_idx = (
-                                resize_options.index(dataset.resize_factor)
-                                if dataset.resize_factor in resize_options
-                                else 0
-                            )
-                            changed, new_idx = layout.combo(
-                                "##py_resize_factor", current_idx, resize_labels
-                            )
-                            if changed:
-                                dataset.resize_factor = resize_options[new_idx]
-                            layout.pop_item_width()
-                        else:
-                            layout.label(
-                                tr("common.auto")
-                                if dataset.resize_factor < 0
-                                else str(dataset.resize_factor)
-                            )
-
-                        layout.table_next_row()
-                        layout.table_next_column()
-                        layout.label(tr("training.dataset.max_width"))
-                        layout.table_next_column()
-                        if dataset_can_edit:
-                            layout.push_item_width(-1)
-                            changed, new_val = layout.input_int(
-                                "##py_max_width", dataset.max_width, 80, 400
-                            )
-                            if changed and new_val >= 0:
-                                dataset.max_width = new_val
-                            layout.pop_item_width()
-                        else:
-                            layout.label(str(dataset.max_width))
-
-                        layout.table_next_row()
-                        layout.table_next_column()
-                        layout.label(tr("training.dataset.cpu_cache"))
-                        layout.table_next_column()
-                        if dataset_can_edit:
-                            changed, new_val = layout.checkbox(
-                                "##py_cpu_cache", dataset.use_cpu_cache
-                            )
-                            if changed:
-                                dataset.use_cpu_cache = new_val
-                        else:
-                            layout.label(
-                                tr("training.status.enabled")
-                                if dataset.use_cpu_cache
-                                else tr("training.status.disabled")
-                            )
-
-                        layout.table_next_row()
-                        layout.table_next_column()
-                        layout.label(tr("training.dataset.fs_cache"))
-                        layout.table_next_column()
-                        if dataset_can_edit:
-                            changed, new_val = layout.checkbox(
-                                "##py_fs_cache", dataset.use_fs_cache
-                            )
-                            if changed:
-                                dataset.use_fs_cache = new_val
-                        else:
-                            layout.label(
-                                tr("training.status.enabled")
-                                if dataset.use_fs_cache
-                                else tr("training.status.disabled")
-                            )
-
-                        out_path = dataset.output_path
-                        self._table_text(
-                            layout,
-                            tr("training.dataset.output"),
-                            os.path.basename(out_path)
-                            if out_path
-                            else tr("training.value.not_set"),
-                        )
-                else:
-                    layout.label(tr("training_panel.no_dataset_loaded"))
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if layout.tree_node(tr("training.section.optimization") + "##py"):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PyOptTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 120.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-
-                    layout.begin_disabled(not can_edit)
-                    self._table_text(
-                        layout, tr("training_params.strategy"), params.strategy.upper()
-                    )
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.text_colored(
-                        tr("training.opt.learning_rates"), (0.6, 0.6, 0.6, 1.0)
-                    )
-                    layout.table_next_column()
-
-                    self._input_float_row(
-                        layout,
-                        tr("training.opt.lr.position"),
-                        "means_lr",
-                        params,
-                        params.means_lr,
-                        0.000001,
-                        0.00001,
-                        "%.6f",
-                    )
-                    self._input_float_row(
-                        layout,
-                        tr("training.opt.lr.sh_coeff"),
-                        "shs_lr",
-                        params,
-                        params.shs_lr,
-                        0.0001,
-                        0.001,
-                        "%.4f",
-                    )
-                    self._input_float_row(
-                        layout,
-                        tr("training.opt.lr.opacity"),
-                        "opacity_lr",
-                        params,
-                        params.opacity_lr,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                    )
-                    self._input_float_row(
-                        layout,
-                        tr("training.opt.lr.scaling"),
-                        "scaling_lr",
-                        params,
-                        params.scaling_lr,
-                        0.0001,
-                        0.001,
-                        "%.4f",
-                    )
-                    self._input_float_row(
-                        layout,
-                        tr("training.opt.lr.rotation"),
-                        "rotation_lr",
-                        params,
-                        params.rotation_lr,
-                        0.0001,
-                        0.001,
-                        "%.4f",
-                    )
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.text_colored(
-                        tr("training.section.refinement"), (0.6, 0.6, 0.6, 1.0)
-                    )
-                    layout.table_next_column()
-
-                    self._input_int_row(
-                        layout,
-                        tr("training.refinement.refine_every"),
-                        "refine_every",
-                        params,
-                        10,
-                        100,
-                    )
-                    self._input_int_row(
-                        layout,
-                        tr("training.refinement.start_refine"),
-                        "start_refine",
-                        params,
-                        100,
-                        500,
-                    )
-                    self._input_int_row(
-                        layout,
-                        tr("training.refinement.stop_refine"),
-                        "stop_refine",
-                        params,
-                        1000,
-                        5000,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.refinement.gradient_thr"),
-                        "grad_threshold",
-                        params,
-                        0.00001,
-                        0.0001,
-                        "%.6f",
-                    )
-                    self._input_int_row(
-                        layout,
-                        tr("training.refinement.reset_every"),
-                        "reset_every",
-                        params,
-                        100,
-                        1000,
-                    )
-                    self._input_int_row(
-                        layout,
-                        tr("training.refinement.sh_upgrade_every"),
-                        "sh_degree_interval",
-                        params,
-                        100,
-                        500,
-                    )
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if params.use_bilateral_grid and layout.tree_node(
-            tr("training.section.bilateral_grid") + "##py"
-        ):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PyBilateralTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 140.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-                    layout.begin_disabled(not can_edit)
-                    self._table_prop(
-                        layout,
-                        params,
-                        "bilateral_grid_x",
-                        tr("training.bilateral.grid_x"),
-                    )
-                    self._table_prop(
-                        layout,
-                        params,
-                        "bilateral_grid_y",
-                        tr("training.bilateral.grid_y"),
-                    )
-                    self._table_prop(
-                        layout,
-                        params,
-                        "bilateral_grid_w",
-                        tr("training.bilateral.grid_w"),
-                    )
-                    self._table_prop(
-                        layout,
-                        params,
-                        "bilateral_grid_lr",
-                        tr("training.bilateral.learning_rate"),
-                    )
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if layout.tree_node(tr("training.section.losses") + "##py"):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PyLossTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 140.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-                    layout.begin_disabled(not can_edit)
-                    self._slider_float_row(
-                        layout,
-                        tr("training.losses.lambda_dssim"),
-                        "lambda_dssim",
-                        params,
-                        0.0,
-                        1.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.losses.opacity_reg"),
-                        "opacity_reg",
-                        params,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.losses.scale_reg"),
-                        "scale_reg",
-                        params,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.losses.tv_loss_weight"),
-                        "tv_loss_weight",
-                        params,
-                        1.0,
-                        5.0,
-                        "%.1f",
-                    )
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if layout.tree_node(tr("training.section.initialization") + "##py"):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PyInitTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 140.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-                    layout.begin_disabled(not can_edit)
-                    self._slider_float_row(
-                        layout,
-                        tr("training.init.init_opacity"),
-                        "init_opacity",
-                        params,
-                        0.01,
-                        1.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.init.init_scaling"),
-                        "init_scaling",
-                        params,
-                        0.01,
-                        0.1,
-                        "%.3f",
-                    )
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.label(tr("training.init.random_init"))
-                    layout.table_next_column()
-                    changed, new_val = layout.checkbox("##py_random", params.random)
-                    if changed:
-                        params.random = new_val
-
-                    if params.random:
-                        self._input_int_row(
-                            layout,
-                            tr("training.init.num_points"),
-                            "init_num_pts",
-                            params,
-                            10000,
-                            50000,
-                        )
-                        self._input_float_prop_row(
-                            layout,
-                            tr("training.init.extent"),
-                            "init_extent",
-                            params,
-                            0.5,
-                            1.0,
-                            "%.1f",
-                        )
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if params.strategy == "igs+" and layout.tree_node(
-            tr("training_panel.pruning_growing") + "##py"
-        ):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PyPruningGrowingTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 140.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-                    layout.begin_disabled(not can_edit)
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.thresholds.min_opacity"),
-                        "min_opacity",
-                        params,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.thresholds.prune_opacity"),
-                        "prune_opacity",
-                        params,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.thresholds.grow_scale_3d"),
-                        "grow_scale3d",
-                        params,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.thresholds.grow_scale_2d"),
-                        "grow_scale2d",
-                        params,
-                        0.01,
-                        0.05,
-                        "%.3f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.thresholds.prune_scale_3d"),
-                        "prune_scale3d",
-                        params,
-                        0.01,
-                        0.1,
-                        "%.3f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training.thresholds.prune_scale_2d"),
-                        "prune_scale2d",
-                        params,
-                        0.01,
-                        0.1,
-                        "%.3f",
-                        min_val=0.0,
-                    )
-                    self._input_int_row(
-                        layout,
-                        tr("training.thresholds.pause_after_reset"),
-                        "pause_refine_after_reset",
-                        params,
-                        100,
-                        500,
-                    )
-                    self._table_prop(
-                        layout,
-                        params,
-                        "revised_opacity",
-                        tr("training.thresholds.revised_opacity"),
-                    )
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if _is_mrnf_strategy(params.strategy) and layout.tree_node(
-            tr("training_panel.mrnf_params") + "##py"
-        ):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PyMRNFTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 140.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-                    layout.begin_disabled(not can_edit)
-                    self._input_float_prop_row(
-                        layout,
-                        "Growth Grad Threshold",
-                        "growth_grad_threshold",
-                        params,
-                        0.0001,
-                        0.001,
-                        "%.5f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        "Grow Fraction",
-                        "grow_fraction",
-                        params,
-                        0.01,
-                        0.05,
-                        "%.3f",
-                        min_val=0.0,
-                        max_val=1.0,
-                    )
-                    self._input_int_row(
-                        layout, "Grow Until Iter", "grow_until_iter", params, 1000, 5000
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        "Opacity Decay",
-                        "opacity_decay",
-                        params,
-                        0.0001,
-                        0.001,
-                        "%.4f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        "Scale Decay",
-                        "scale_decay",
-                        params,
-                        0.0001,
-                        0.001,
-                        "%.4f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        "Means Noise Weight",
-                        "means_noise_weight",
-                        params,
-                        1.0,
-                        10.0,
-                        "%.1f",
-                        min_val=0.0,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        "Bounds Percentile",
-                        "bounds_percentile",
-                        params,
-                        0.01,
-                        0.05,
-                        "%.2f",
-                        min_val=0.5,
-                        max_val=1.0,
-                    )
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.label("Error Map")
-                    layout.table_next_column()
-                    changed, new_val = layout.checkbox(
-                        "##py_use_error_map", params.use_error_map
-                    )
-                    if changed:
-                        params.use_error_map = new_val
-
-                    layout.table_next_row()
-                    layout.table_next_column()
-                    layout.label("Edge Map")
-                    layout.table_next_column()
-                    changed, new_val = layout.checkbox(
-                        "##py_use_edge_map", params.use_edge_map
-                    )
-                    if changed:
-                        params.use_edge_map = new_val
-
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if params.enable_sparsity and layout.tree_node(
-            tr("training_panel.sparsity") + "##py"
-        ):
-            table_open = False
-            try:
-                table_open = layout.begin_table("PySparsityTable", 2)
-                if table_open:
-                    layout.table_setup_column(tr("common.column_label"), 140.0)
-                    layout.table_setup_column(tr("common.column_control"), 0.0)
-                    layout.begin_disabled(not can_edit)
-                    self._input_int_row(
-                        layout,
-                        tr("training_params.sparsify_steps"),
-                        "sparsify_steps",
-                        params,
-                        1000,
-                        5000,
-                    )
-                    self._input_float_prop_row(
-                        layout,
-                        tr("training_params.init_rho"),
-                        "init_rho",
-                        params,
-                        0.001,
-                        0.01,
-                        "%.4f",
-                    )
-                    self._slider_float_row(
-                        layout,
-                        tr("training_params.prune_ratio"),
-                        "prune_ratio",
-                        params,
-                        0.0,
-                        1.0,
-                    )
-                    layout.end_disabled()
-            finally:
-                if table_open:
-                    layout.end_table()
-                layout.tree_pop()
-
-        if layout.tree_node(tr("training_panel.save_steps") + "##py"):
-            try:
-                self._draw_save_steps(layout, params, can_edit)
-            finally:
-                layout.tree_pop()
-
-    def _draw_save_steps(self, layout, params, can_edit):
-        theme = lf.ui.theme()
-        steps = list(params.save_steps)
-
-        if can_edit:
-            _, self._new_save_step = layout.input_int_formatted(
-                "##py_new_step", self._new_save_step, 100, 1000
-            )
-            layout.same_line()
-            if layout.button(tr("common.add") + "##py_add"):
-                if self._new_save_step > 0:
-                    params.add_save_step(self._new_save_step)
-                    if params.enable_eval:
-                        self._sync_eval_steps_with_save_steps(params)
-
-            layout.separator()
-
-            for i, step in enumerate(steps):
-                layout.push_id(f"py_step_{i}")
-                layout.set_next_item_width(100)
-                changed, new_val = layout.input_int_formatted("##step", step, 0, 0)
-                if changed and new_val > 0 and new_val != step:
-                    params.remove_save_step(step)
-                    params.add_save_step(new_val)
-                    if params.enable_eval:
-                        self._sync_eval_steps_with_save_steps(params)
-                layout.same_line()
-                if layout.button(tr("common.remove") + "##rm"):
-                    params.remove_save_step(step)
-                    if params.enable_eval:
-                        self._remove_from_eval_steps(params, step)
-                layout.pop_id()
-
-            if not steps:
-                layout.text_colored(
-                    tr("training_panel.no_save_steps"), theme.palette.text_dim
-                )
-        else:
-            if steps:
-                layout.label(", ".join(str(s) for s in steps))
-            else:
-                layout.text_colored(
-                    tr("training_panel.no_save_steps"), theme.palette.text_dim
-                )
-
-    def _input_int_row(self, layout, label, prop_id, params, step, step_fast):
-        layout.table_next_row()
-        layout.table_next_column()
-        layout.label(label)
-        layout.table_next_column()
-        layout.push_item_width(-1)
-        current_val = params.get(prop_id)
-        if current_val is None:
-            current_val = 0
-        changed, new_val = layout.input_int_formatted(
-            f"##py_{prop_id}", int(current_val), step, step_fast
-        )
-        if changed and new_val >= 0:
-            params.set(prop_id, new_val)
-        layout.pop_item_width()
-
-    def _input_float_prop_row(
-        self, layout, label, prop_id, params, step, step_fast, fmt, min_val=None
-    ):
-        layout.table_next_row()
-        layout.table_next_column()
-        layout.label(label)
-        layout.table_next_column()
-        layout.push_item_width(-1)
-        current_val = params.get(prop_id)
-        if current_val is None:
-            current_val = 0.0
-        changed, new_val = layout.input_float(
-            f"##py_{prop_id}", float(current_val), step, step_fast, fmt
-        )
-        if changed:
-            if min_val is not None:
-                new_val = max(min_val, new_val)
-            params.set(prop_id, new_val)
-        layout.pop_item_width()
-
-    def _slider_float_row(self, layout, label, prop_id, params, min_val, max_val):
-        layout.table_next_row()
-        layout.table_next_column()
-        layout.label(label)
-        layout.table_next_column()
-        layout.push_item_width(-1)
-        current_val = params.get(prop_id)
-        if current_val is None:
-            current_val = 0.0
-        changed, new_val = layout.slider_float(
-            f"##py_{prop_id}", float(current_val), min_val, max_val
-        )
-        if changed:
-            params.set(prop_id, new_val)
-        layout.pop_item_width()
-
-    def _input_float_row(
-        self, layout, label, prop_id, params, value, step, step_fast, fmt
-    ):
-        layout.table_next_row()
-        layout.table_next_column()
-        layout.label(label)
-        layout.table_next_column()
-        layout.push_item_width(-1)
-        changed, new_val = layout.input_float(
-            f"##py_{prop_id}", value, step, step_fast, fmt
-        )
-        if changed:
-            setattr(params, prop_id, new_val)
-        layout.pop_item_width()
-
-    def _table_prop(self, layout, params, prop_id, label):
-        layout.table_next_row()
-        layout.table_next_column()
-        layout.label(label)
-        layout.table_next_column()
-        layout.push_item_width(-1)
-        layout.push_id(f"py_{prop_id}")
-        layout.prop(params, prop_id)
-        layout.pop_id()
-        layout.pop_item_width()
-
-    def _table_text(self, layout, label, value):
-        layout.table_next_row()
-        layout.table_next_column()
-        layout.label(label)
-        layout.table_next_column()
-        layout.label(value)
-
-    def _draw_status(self, layout, state, iteration):
-        layout.separator()
-
-        state_labels = {
-            "idle": tr("training_panel.idle"),
-            "ready": tr("status.ready")
-            if iteration == 0
-            else tr("training_panel.resume"),
-            "running": tr("training_panel.running"),
-            "paused": tr("status.paused"),
-            "stopping": tr("status.stopping"),
-            "completed": tr("status.complete"),
-            "stopped": tr("status.stopped"),
-            "error": tr("status.error"),
-        }
-        unknown_state = tr("status.unknown")
-        layout.label(f"{tr('status.mode')} {state_labels.get(state, unknown_state)}")
-
-        _rate_tracker.add_sample(iteration)
-        rate = _rate_tracker.get_rate()
-        layout.label(
-            f"{tr('status.iteration')} {iteration:,} ({rate:.1f} {tr('training_panel.iters_per_sec')})"
-        )
-        layout.label(tr("progress.num_splats") % f"{RuntimeState.num_gaussians.value:,}")
-
-        max_iter = RuntimeState.max_iterations.value
-        if max_iter > 0 and iteration > 0:
-            layout.progress_bar(iteration / max_iter, f"{iteration:,}/{max_iter:,}")
-
-        loss_data = lf.loss_buffer()
-        if loss_data:
-            min_val = min(loss_data)
-            max_val = max(loss_data)
-            if min_val == max_val:
-                min_val -= 1.0
-                max_val += 1.0
-            else:
-                margin = (max_val - min_val) * 0.05
-                min_val -= margin
-                max_val += margin
-            loss_label = f"{tr('status.loss')}: {loss_data[-1]:.4f}"
-            layout.plot_lines(loss_label, loss_data, min_val, max_val, (-1, 60))
+    def _set_auto_scale_steps_locked(self, locked):
+        locked = bool(locked)
+        if self._auto_scale_steps_locked == locked:
+            return
+        self._auto_scale_steps_locked = locked
+
+        if locked:
+            self._auto_scaled_for_cameras = 0
+            params = lf.optimization_params()
+            if params and params.has_params() and self._try_auto_scale_steps(params):
+                self._sync_text_bufs()
+
+        if self._handle:
+            self._handle.dirty_all()

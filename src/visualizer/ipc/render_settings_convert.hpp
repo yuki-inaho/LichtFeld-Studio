@@ -57,6 +57,7 @@ namespace lfs::vis {
         p.eval_camera_color = detail::to_array(s.eval_camera_color);
         p.show_pivot = s.show_pivot;
         p.split_view_mode = static_cast<int>(s.split_view_mode);
+        p.gt_comparison_mode = static_cast<int>(s.gt_comparison_mode);
         p.split_position = s.split_position;
         p.raster_backend = static_cast<int>(s.raster_backend);
         p.gut = lfs::rendering::isGutBackend(s.raster_backend);
@@ -89,6 +90,8 @@ namespace lfs::vis {
         p.lod_debug_colors = s.lod_debug_colors;
         p.lod_max_splats = static_cast<float>(s.lod_max_splats);
         p.lod_page_pool_splats = static_cast<float>(s.lod_page_pool_splats);
+        p.lod_pool_vram_fraction = s.lod_pool_vram_fraction;
+        p.lod_fade_frames = static_cast<float>(s.lod_fade_frames);
         p.lod_render_scale = s.lod_render_scale;
         p.lod_cone_foveation = s.lod_cone_foveation;
         p.lod_cone_inner_degrees = s.lod_cone_inner_degrees;
@@ -137,6 +140,8 @@ namespace lfs::vis {
         s.eval_camera_color = detail::to_vec3(p.eval_camera_color);
         s.show_pivot = p.show_pivot;
         s.split_view_mode = static_cast<SplitViewMode>(p.split_view_mode);
+        s.gt_comparison_mode = static_cast<GTComparisonMode>(p.gt_comparison_mode);
+        sanitizeGTComparisonSettings(s);
         s.split_position = p.split_position;
         const auto previous_backend = s.raster_backend;
         const bool previous_gut = s.gut;
@@ -179,6 +184,8 @@ namespace lfs::vis {
         s.lod_debug_colors = p.lod_debug_colors;
         s.lod_max_splats = static_cast<size_t>(p.lod_max_splats);
         s.lod_page_pool_splats = static_cast<size_t>(p.lod_page_pool_splats);
+        s.lod_pool_vram_fraction = std::clamp(p.lod_pool_vram_fraction, 0.05f, 0.9f);
+        s.lod_fade_frames = std::clamp(static_cast<int>(p.lod_fade_frames), 0, 240);
         s.lod_render_scale = p.lod_render_scale;
         s.lod_cone_foveation = p.lod_cone_foveation;
         s.lod_cone_inner_degrees = p.lod_cone_inner_degrees;

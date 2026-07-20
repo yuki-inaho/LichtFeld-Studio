@@ -6,6 +6,7 @@
 #include "core/events.hpp"
 #include "core/logger.hpp"
 #include "point_cloud_vulkan_renderer.hpp"
+#include "rendering/export_post_process.hpp"
 #include "rendering/ppisp_overrides_utils.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/selection_ops.hpp"
@@ -120,6 +121,7 @@ namespace lfs::vis {
         }
         camera_metrics_worker_.request_stop();
         camera_metrics_cv_.notify_all();
+        lfs::rendering::releaseEnvironmentMapCaches();
     }
 
     void RenderingManager::setWakeCallback(std::function<void()> callback) {
@@ -157,6 +159,11 @@ namespace lfs::vis {
         LOG_TRACE("Render marked dirty (flags: 0x{:x})", flags);
     }
 
+    void RenderingManager::markCameraPoseChanged() {
+        camera_pose_dirty_.store(true, std::memory_order_release);
+        markDirty(DirtyFlag::CAMERA);
+    }
+
     bool RenderingManager::pollDirtyState() {
         if (const DirtyMask animation_dirty = animation_state_.pollDirtyState(); animation_dirty) {
             dirty_mask_.fetch_or(animation_dirty, std::memory_order_relaxed);
@@ -169,7 +176,7 @@ namespace lfs::vis {
         return dirty_mask_.load(std::memory_order_relaxed) != 0;
     }
 
-    void RenderingManager::notifyAsyncLodResultsReady() {
+    void RenderingManager::requestRenderFollowUp() {
         dirty_mask_.fetch_or(DirtyFlag::CAMERA, std::memory_order_relaxed);
 
         std::function<void()> wake_callback;
@@ -182,10 +189,44 @@ namespace lfs::vis {
         }
     }
 
+    void RenderingManager::notifyAsyncLodResultsReady() {
+        requestRenderFollowUp();
+    }
+
     void RenderingManager::setViewportResizeActive(bool active) {
         if (const DirtyMask dirty = frame_lifecycle_service_.setViewportResizeActive(active); dirty) {
             markDirty(dirty);
+            std::function<void()> wake_callback;
+            {
+                std::scoped_lock lock(wake_callback_mutex_);
+                wake_callback = wake_callback_;
+            }
+            if (wake_callback) {
+                wake_callback();
+            }
         }
+    }
+
+    void RenderingManager::requestResizeTrainingPause(TrainerManager* const trainer_manager) {
+        if (resize_training_pause_active_ || !trainer_manager || !trainer_manager->isRunning()) {
+            return;
+        }
+
+        trainer_manager->pauseTrainingTemporary();
+        resize_training_pause_trainer_ = trainer_manager;
+        resize_training_pause_active_ = true;
+    }
+
+    void RenderingManager::releaseResizeTrainingPause() {
+        if (!resize_training_pause_active_) {
+            return;
+        }
+
+        if (resize_training_pause_trainer_) {
+            resize_training_pause_trainer_->resumeTrainingTemporary();
+        }
+        resize_training_pause_trainer_ = nullptr;
+        resize_training_pause_active_ = false;
     }
 
     void RenderingManager::setLodAvailable(bool available) {
@@ -269,6 +310,9 @@ namespace lfs::vis {
                 stats.gpu_pixel_scale_feedback = gpu.pixel_scale_feedback;
                 stats.pool_pages = gpu.pool_pages;
                 stats.streaming_jobs = gpu.streaming_jobs;
+                stats.miss_chunks = gpu.miss_chunks;
+                stats.deferred_requests = gpu.deferred_requests;
+                stats.admission_frozen = gpu.admission_frozen;
             }
         }
 
@@ -296,17 +340,25 @@ namespace lfs::vis {
         frame_lifecycle_service_.resetModelTracking();
     }
 
-    void RenderingManager::releaseSceneRenderResources() {
-        viewport_artifact_service_.clearViewportOutput();
+    void RenderingManager::clearVulkanViewportImageState(const glm::ivec2 size,
+                                                         const bool flip_y) {
         vulkan_viewport_image_.reset();
-        vulkan_viewport_image_generation_ = 0;
         vulkan_external_viewport_image_ = VK_NULL_HANDLE;
         vulkan_external_viewport_image_view_ = VK_NULL_HANDLE;
         vulkan_external_viewport_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         vulkan_external_viewport_image_generation_ = 0;
+        vulkan_viewport_image_size_ = size;
+        vulkan_viewport_image_flip_y_ = flip_y;
+        vulkan_gt_comparison_content_size_ = {0, 0};
+    }
+
+    void RenderingManager::releaseSceneRenderResources() {
+        viewport_artifact_service_.clearViewportOutput();
+        gt_comparison_image_cache_ = {};
+        clearVulkanViewportImageState();
+        last_logged_vksplat_render_error_.clear();
+        vulkan_viewport_image_generation_ = 0;
         split_view_image_generation_ = 0;
-        vulkan_viewport_image_size_ = {0, 0};
-        vulkan_viewport_image_flip_y_ = false;
 
         clearVulkanMeshFrame();
 
@@ -332,46 +384,51 @@ namespace lfs::vis {
 
     void RenderingManager::updateSettings(const RenderSettings& new_settings,
                                           const DirtyMask dirty_flags) {
+        RenderSettings sanitized_settings = new_settings;
         bool clear_metrics = false;
         bool lod_request_changed = false;
         bool lod_enabled_turned_on = false;
         {
             std::lock_guard<std::mutex> lock(settings_mutex_);
+            if (split_view_service_.isGTComparisonActive(settings_) ||
+                split_view_service_.isGTComparisonActive(sanitized_settings)) {
+                sanitized_settings.show_camera_frustums = false;
+            }
             const int focused_panel_index =
                 static_cast<int>(splitViewPanelIndex(split_view_service_.focusedPanel()));
-            const bool grid_plane_changed = settings_.grid_plane != new_settings.grid_plane;
-            lod_enabled_turned_on = !settings_.lod_enabled && new_settings.lod_enabled;
+            const bool grid_plane_changed = settings_.grid_plane != sanitized_settings.grid_plane;
+            lod_enabled_turned_on = !settings_.lod_enabled && sanitized_settings.lod_enabled;
             lod_request_changed =
-                settings_.lod_enabled != new_settings.lod_enabled ||
-                settings_.lod_max_splats != new_settings.lod_max_splats ||
-                settings_.lod_render_scale != new_settings.lod_render_scale ||
-                settings_.lod_behind_camera_penalty != new_settings.lod_behind_camera_penalty ||
-                settings_.lod_cone_foveation != new_settings.lod_cone_foveation ||
-                settings_.lod_cone_inner_degrees != new_settings.lod_cone_inner_degrees ||
-                settings_.lod_cone_outer_degrees != new_settings.lod_cone_outer_degrees;
+                settings_.lod_enabled != sanitized_settings.lod_enabled ||
+                settings_.lod_max_splats != sanitized_settings.lod_max_splats ||
+                settings_.lod_render_scale != sanitized_settings.lod_render_scale ||
+                settings_.lod_behind_camera_penalty != sanitized_settings.lod_behind_camera_penalty ||
+                settings_.lod_cone_foveation != sanitized_settings.lod_cone_foveation ||
+                settings_.lod_cone_inner_degrees != sanitized_settings.lod_cone_inner_degrees ||
+                settings_.lod_cone_outer_degrees != sanitized_settings.lod_cone_outer_degrees;
 
             // Update preview color if changed
-            if (settings_.selection_color_preview != new_settings.selection_color_preview) {
-                const auto& p = new_settings.selection_color_preview;
+            if (settings_.selection_color_preview != sanitized_settings.selection_color_preview) {
+                const auto& p = sanitized_settings.selection_color_preview;
                 lfs::rendering::config::setSelectionPreviewColor(make_float3(p.x, p.y, p.z));
             }
 
             // Update center marker color (group 0) if changed
-            if (settings_.selection_color_center_marker != new_settings.selection_color_center_marker) {
-                const auto& m = new_settings.selection_color_center_marker;
+            if (settings_.selection_color_center_marker != sanitized_settings.selection_color_center_marker) {
+                const auto& m = sanitized_settings.selection_color_center_marker;
                 lfs::rendering::config::setSelectionGroupColor(0, make_float3(m.x, m.y, m.z));
             }
 
-            if (new_settings.camera_metrics_mode == RenderSettings::CameraMetricsMode::Off) {
+            if (sanitized_settings.camera_metrics_mode == RenderSettings::CameraMetricsMode::Off) {
                 clear_metrics = true;
             } else if (camera_interaction_service_.currentCameraId() >= 0 &&
-                       shouldRefreshCameraMetricsForSettings(settings_, new_settings)) {
+                       shouldRefreshCameraMetricsForSettings(settings_, sanitized_settings)) {
                 clear_metrics = true;
             }
 
             const auto previous_backend = settings_.raster_backend;
             const bool previous_gut = settings_.gut;
-            settings_ = new_settings;
+            settings_ = sanitized_settings;
             const bool gut_toggle_only =
                 settings_.raster_backend == previous_backend && settings_.gut != previous_gut;
             settings_.raster_backend = gut_toggle_only
@@ -381,6 +438,7 @@ namespace lfs::vis {
             settings_.gut = lfs::rendering::isGutBackend(settings_.raster_backend);
             enforceProjectionBackend(settings_);
             sanitizeDepthViewSettings(settings_);
+            sanitizeGTComparisonSettings(settings_);
             settings_.grid_plane = clampGridPlane(settings_.grid_plane);
             if (split_view_service_.isIndependentDualActive(settings_)) {
                 if (grid_plane_changed) {
@@ -766,6 +824,11 @@ namespace lfs::vis {
             auto event = lfs::core::events::ui::RenderSettingsChanged{};
             event.equirectangular = *result.restore_equirectangular;
             event.emit();
+        }
+        if (result.render_settings_changed) {
+            markDirty(DirtyFlag::OVERLAY);
+            auto& render_settings_generation = app_store().render_settings_generation;
+            render_settings_generation.set(render_settings_generation.get() + 1);
         }
     }
 

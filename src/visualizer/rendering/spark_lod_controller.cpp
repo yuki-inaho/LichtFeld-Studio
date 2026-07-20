@@ -147,7 +147,32 @@ namespace lfs::vis {
         const auto& tree = *data.lod_tree;
         const size_t n = tree.total_nodes();
         if (n == 0 || n > static_cast<size_t>(data.size())) {
-            detach();
+            // Out-of-core model: the GPU selector drives the cut and CPU
+            // traversal stays detached, but the model/tree stats are still
+            // this controller's to report.
+            if (n > 0 && (tree.meta_view.valid() || tree.child_count.size() >= n)) {
+                size_t leaf_count = 0;
+                if (tree.meta_view.valid()) {
+                    leaf_count = tree.meta_view.leaf_count;
+                } else {
+                    for (size_t i = 0; i < n; ++i) {
+                        leaf_count += tree.child_count[i] == 0 ? 1 : 0;
+                    }
+                }
+                Stats stats{};
+                stats.available = true;
+                stats.has_tree = true;
+                stats.lod_opacity_encoded = tree.lod_opacity_encoded;
+                stats.model_splats = leaf_count;
+                stats.tree_nodes = n;
+                stats.non_leaf_nodes = n - leaf_count;
+                stats.full_quality_splats = leaf_count;
+                stats.chunk_splats = kSparkLodChunkSplats;
+                stats.chunk_count = tree.chunk_count();
+                base_stats_ = stats;
+                std::scoped_lock lock(mutex_);
+                current_stats_ = stats;
+            }
             return;
         }
         if (tree.child_start.size() < n || tree.child_count.size() < n) {
@@ -367,6 +392,19 @@ namespace lfs::vis {
     }
 
     void SparkLodController::detach() {
+        {
+            std::unique_lock lock(mutex_);
+            pending_work_.reset();
+            ready_available_ = false;
+            const uint64_t generation = ++next_work_generation_;
+            latest_requested_generation_.store(generation, std::memory_order_release);
+            min_valid_work_generation_.store(generation, std::memory_order_release);
+            cv_.notify_all();
+            cv_.wait(lock, [this] { return !worker_busy_; });
+        }
+
+        // The worker traverses these vectors without holding mutex_. They are safe to clear only
+        // after the cancellation generation has been observed and the active traversal has left.
         nodes_.clear();
         {
             std::scoped_lock lock(page_maps_mutex_);
@@ -779,19 +817,30 @@ namespace lfs::vis {
                 }
                 work = *pending_work_;
                 pending_work_.reset();
+                worker_busy_ = true;
             }
 
-            const auto result = traverse(work.view_matrix,
-                                         work.params,
-                                         async_scratch_,
-                                         async_indices_,
-                                         async_logical_indices_,
-                                         work.guidance,
-                                         work.generation);
-            if (result.cancelled || stop_token.stop_requested()) {
-                continue;
+            try {
+                const auto result = traverse(work.view_matrix,
+                                             work.params,
+                                             async_scratch_,
+                                             async_indices_,
+                                             async_logical_indices_,
+                                             work.guidance,
+                                             work.generation);
+                if (!result.cancelled && !stop_token.stop_requested()) {
+                    publishAsyncResult(work, result);
+                }
+            } catch (const std::exception& error) {
+                LOG_ERROR("LOD traversal worker failed: {}", error.what());
+            } catch (...) {
+                LOG_ERROR("LOD traversal worker failed with an unknown error");
             }
-            publishAsyncResult(work, result);
+            {
+                std::scoped_lock lock(mutex_);
+                worker_busy_ = false;
+            }
+            cv_.notify_all();
         }
     }
 
@@ -844,7 +893,10 @@ namespace lfs::vis {
         }
         const std::uint32_t page = page_maps.chunk_to_page[chunk];
         if (page == kSparkInvalidPage) {
-            return node_index;
+            // Evicted chunk: the raw node index would address the pool tensor
+            // out of range and render an unrelated splat. The projection
+            // shader skips the invalid sentinel cleanly.
+            return kSparkInvalidPage;
         }
         return page * static_cast<std::uint32_t>(kSparkLodChunkSplats) +
                (node_index & static_cast<std::uint32_t>(kSparkLodChunkSplats - 1));

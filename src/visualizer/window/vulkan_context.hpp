@@ -5,16 +5,22 @@
 #pragma once
 
 #include "core/export.hpp"
+#include "rendering/vulkan_result.hpp"
 #include "vulkan_image_barrier_tracker.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <optional>
+#include <source_location>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -32,6 +38,11 @@ namespace lfs::vis {
 
     class VulkanContext {
     public:
+        enum class ResizeIntent {
+            Interactive,
+            Exact,
+        };
+
         VulkanContext() = default;
         ~VulkanContext();
 
@@ -40,7 +51,12 @@ namespace lfs::vis {
 
         bool init(SDL_Window* window, int framebuffer_width, int framebuffer_height);
         void shutdown();
-        void notifyFramebufferResized(int width, int height);
+        void notifyFramebufferResized(int width, int height, ResizeIntent intent = ResizeIntent::Exact);
+        [[nodiscard]] bool hasPendingSwapchainResize() const {
+            return framebuffer_resize_deferred_ || framebuffer_resize_exact_after_interactive_;
+        }
+        [[nodiscard]] bool pendingSwapchainResizeReady() const;
+        [[nodiscard]] double secondsUntilPendingSwapchainResizeReady() const;
 
         [[nodiscard]] bool presentBootstrapFrame(float r, float g, float b, float a);
         [[nodiscard]] const std::string& lastError() const { return last_error_; }
@@ -97,6 +113,45 @@ namespace lfs::vis {
             ExternalNativeHandle native_handle = kInvalidExternalNativeHandle;
         };
 
+        struct TimelinePoint {
+            TimelinePoint(VkSemaphore semaphore, std::uint64_t value) noexcept
+                : semaphore(semaphore),
+                  value(value) {}
+
+            VkSemaphore semaphore;
+            std::uint64_t value;
+        };
+
+        struct ImmediateTransitionOptions {
+            VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
+            std::optional<TimelinePoint> wait;
+            VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            std::optional<TimelinePoint> signal;
+
+            [[nodiscard]] static ImmediateTransitionOptions waitOn(
+                TimelinePoint point,
+                VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT) noexcept {
+                return {
+                    .aspect_mask = aspect,
+                    .wait = point,
+                    .wait_stage = stage,
+                    .signal = std::nullopt,
+                };
+            }
+
+            [[nodiscard]] static ImmediateTransitionOptions signalAt(
+                TimelinePoint point,
+                VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT) noexcept {
+                return {
+                    .aspect_mask = aspect,
+                    .wait = std::nullopt,
+                    .wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    .signal = point,
+                };
+            }
+        };
+
         [[nodiscard]] VkInstance instance() const { return instance_; }
         [[nodiscard]] VkPhysicalDevice physicalDevice() const { return physical_device_; }
         [[nodiscard]] VkDevice device() const { return device_; }
@@ -112,12 +167,14 @@ namespace lfs::vis {
         [[nodiscard]] VkColorSpaceKHR swapchainColorSpace() const { return swapchain_color_space_; }
         [[nodiscard]] bool hasHdr() const noexcept { return has_hdr_; }
         [[nodiscard]] VkFormat depthStencilFormat() const { return depth_stencil_format_; }
+        [[nodiscard]] VkImageAspectFlags depthStencilAspectMask() const;
         [[nodiscard]] VkImageView depthStencilImageView() const {
-            return active_image_index_ < depth_stencil_resources_.size()
-                       ? depth_stencil_resources_[active_image_index_].view
+            return active_frame_index_ < depth_stencil_resources_.size()
+                       ? depth_stencil_resources_[active_frame_index_].view
                        : VK_NULL_HANDLE;
         }
         [[nodiscard]] VkExtent2D swapchainExtent() const { return swapchain_extent_; }
+        [[nodiscard]] VkExtent2D framebufferExtent() const;
         [[nodiscard]] uint32_t minImageCount() const { return min_image_count_; }
         [[nodiscard]] uint32_t imageCount() const { return static_cast<uint32_t>(swapchain_images_.size()); }
         [[nodiscard]] std::size_t framesInFlight() const { return kFramesInFlight; }
@@ -127,12 +184,12 @@ namespace lfs::vis {
         [[nodiscard]] VulkanImageBarrierTracker& imageBarriers() { return image_barriers_; }
         [[nodiscard]] bool hasPushDescriptor() const { return has_push_descriptor_; }
         [[nodiscard]] PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSet() const { return vk_cmd_push_descriptor_set_; }
-        [[nodiscard]] bool hasShaderObject() const { return has_shader_object_; }
-        [[nodiscard]] bool hasExtendedDynamicState3() const { return has_extended_dynamic_state3_; }
-        [[nodiscard]] bool hasCooperativeMatrix() const { return has_cooperative_matrix_; }
         [[nodiscard]] bool hasHostImageCopy() const { return has_host_image_copy_; }
-        [[nodiscard]] bool hasDescriptorIndexing() const { return has_descriptor_indexing_; }
         [[nodiscard]] bool hasFloat16Storage() const { return has_float16_storage_; }
+        [[nodiscard]] bool hasFillModeNonSolid() const { return has_fill_mode_non_solid_; }
+        [[nodiscard]] bool hasWideLines() const { return has_wide_lines_; }
+        [[nodiscard]] float minLineWidth() const { return line_width_range_[0]; }
+        [[nodiscard]] float maxLineWidth() const { return line_width_range_[1]; }
         // Optional dedicated async-compute queue. When hasDedicatedComputeQueue() is
         // true, computeQueue() / computeQueueFamily() are distinct from graphicsQueue();
         // otherwise they alias the graphics queue and submitting on either is equivalent.
@@ -153,13 +210,30 @@ namespace lfs::vis {
         void setDebugObjectName(VkObjectType object_type, VkHandle object, std::string_view name) const {
             setDebugObjectName(object_type, vulkanObjectHandle(object), name);
         }
+        template <typename VkHandle, typename... Args>
+        void setDebugObjectNamef(VkObjectType object_type,
+                                 VkHandle object,
+                                 std::format_string<Args...> format,
+                                 Args&&... args) const {
+            if (!debugObjectNamingEnabled() || object == VK_NULL_HANDLE) {
+                return;
+            }
+            setDebugObjectName(object_type,
+                               vulkanObjectHandle(object),
+                               std::format(format, std::forward<Args>(args)...));
+        }
         void setDebugObjectName(VkObjectType object_type, std::uint64_t object_handle, std::string_view name) const;
+        [[nodiscard]] bool debugObjectNamingEnabled() const noexcept {
+            return debug_utils_enabled_ && debug_name_writer_.enabled();
+        }
 
         [[nodiscard]] bool beginFrame(const VkClearValue& clear_value, Frame& frame);
         [[nodiscard]] bool endFrame();
-        [[nodiscard]] LFS_VIS_API std::expected<WindowCapture, std::string> captureActiveFrameRgba();
+        [[nodiscard]] bool hasActiveFrame() const noexcept { return frame_active_; }
+        [[nodiscard]] LFS_VIS_API std::expected<WindowCapture, std::string> captureAndEndActiveFrameRgba();
         [[nodiscard]] bool waitForCurrentFrameSlot();
         [[nodiscard]] bool waitForSubmittedFrames();
+        [[nodiscard]] bool waitForImmediateSubmits();
         [[nodiscard]] bool deviceWaitIdle();
         void addFrameTimelineWait(VkSemaphore semaphore,
                                   std::uint64_t value,
@@ -198,13 +272,12 @@ namespace lfs::vis {
         [[nodiscard]] bool transitionImageLayoutImmediate(VkImage image,
                                                           VkImageLayout old_layout,
                                                           VkImageLayout new_layout,
-                                                          VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
-                                                          VkSemaphore wait_semaphore = VK_NULL_HANDLE,
-                                                          std::uint64_t wait_value = 0,
-                                                          VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+                                                          const ImmediateTransitionOptions& options);
 
     private:
-        bool fail(std::string message);
+        bool fail(std::string message,
+                  std::source_location location = std::source_location::current());
+        bool setVkFailure(std::string message);
 
         struct QueueFamilies {
             std::optional<uint32_t> graphics;
@@ -243,10 +316,16 @@ namespace lfs::vis {
         bool createCommandPool();
         bool createCommandBuffers();
         bool createSyncObjects();
+        bool replaceFrameFenceSignaled(std::size_t frame_slot);
         bool createDebugMessenger();
         bool createPipelineCache();
         bool recreateSwapchain();
         bool finishActiveRendering(VkCommandBuffer command_buffer);
+        void deferSwapchainResizeRecreate(bool requires_recreate = true,
+                                          std::optional<bool> allow_headroom = std::nullopt);
+        [[nodiscard]] bool promoteDeferredSwapchainResizeIfSettled();
+        [[nodiscard]] bool framebufferFitsSwapchainExtent() const;
+        [[nodiscard]] bool framebufferResizeRequiresSwapchainRecreate() const;
 
         void destroyDebugMessenger();
         void destroyAllocator();
@@ -268,12 +347,15 @@ namespace lfs::vis {
         [[nodiscard]] SwapchainSupport querySwapchainSupport(VkPhysicalDevice device) const;
         [[nodiscard]] VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const;
         [[nodiscard]] VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& modes) const;
+        [[nodiscard]] std::optional<VkSurfacePresentScalingCapabilitiesEXT>
+        queryPresentScalingCapabilities(VkPresentModeKHR present_mode) const;
         [[nodiscard]] VkExtent2D chooseSwapchainExtent(const VkSurfaceCapabilitiesKHR& capabilities,
                                                        int framebuffer_width,
-                                                       int framebuffer_height) const;
+                                                       int framebuffer_height,
+                                                       bool add_resize_headroom,
+                                                       const VkSurfacePresentScalingCapabilitiesEXT* scaling_capabilities) const;
         [[nodiscard]] VkFormat chooseDepthStencilFormat() const;
         [[nodiscard]] uint32_t findMemoryType(uint32_t type_filter, VkMemoryPropertyFlags properties) const;
-        [[nodiscard]] VkImageAspectFlags depthStencilAspectMask() const;
         [[nodiscard]] std::string makeAllocationDiagnosticLabel(std::string_view label);
         VkInstance instance_ = VK_NULL_HANDLE;
         VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
@@ -310,10 +392,10 @@ namespace lfs::vis {
         VkFormat depth_stencil_format_ = VK_FORMAT_UNDEFINED;
         std::vector<DepthStencilResource> depth_stencil_resources_;
 
-        // Single frame in flight — CPU waits for GPU each frame instead of pre-recording
-        // the next one. Eliminates the frame of cursor latency that comes from "CPU is
-        // 1 frame ahead of GPU".
-        static constexpr std::size_t kFramesInFlight = 1;
+        // Two frame slots keep resize/input processing from blocking on the
+        // previous present's image-availability fence while remaining shallow
+        // enough to avoid the latency of a deep render queue.
+        static constexpr std::size_t kFramesInFlight = 2;
         std::array<VkCommandPool, kFramesInFlight> command_pools_{};
         std::array<VkCommandBuffer, kFramesInFlight> command_buffers_{};
         VkCommandPool immediate_command_pool_ = VK_NULL_HANDLE;
@@ -327,8 +409,12 @@ namespace lfs::vis {
             VkFence fence = VK_NULL_HANDLE;
         };
         std::vector<PendingImmediateSubmit> pending_immediate_submits_;
-        void drainCompletedImmediateSubmits();
+        [[nodiscard]] bool drainCompletedImmediateSubmits();
         std::vector<FrameTimelineWait> frame_timeline_waits_;
+        bool frame_timeline_waits_valid_ = true;
+        std::unordered_map<VkSemaphore, std::uint64_t> last_frame_timeline_wait_values_;
+        std::unordered_map<VkSemaphore, std::uint64_t> last_immediate_timeline_wait_values_;
+        std::unordered_map<VkSemaphore, std::uint64_t> last_immediate_timeline_signal_values_;
         // image_available_ is sized to swapchain image count (not framesInFlight). We must
         // pass a fresh semaphore to each vkAcquireNextImageKHR — reusing one before its
         // signal has been consumed by submit is undefined per spec. Rotation is independent
@@ -337,31 +423,44 @@ namespace lfs::vis {
         std::vector<VkSemaphore> image_available_;
         std::size_t next_acquire_index_ = 0;
         std::size_t active_acquire_index_ = 0;
-        std::array<VkSemaphore, kFramesInFlight> render_finished_{};
+        // Presentation waits are owned per swapchain image. Frame-slot indexing can re-signal a
+        // binary semaphore while an earlier vkQueuePresentKHR wait is still pending whenever the
+        // swapchain has more images than frames in flight.
+        std::vector<VkSemaphore> render_finished_;
         std::array<VkFence, kFramesInFlight> in_flight_{};
         std::array<std::uint64_t, kFramesInFlight> frame_submit_serials_{};
         std::uint64_t frame_submit_serial_ = 0;
         std::vector<VkFence> swapchain_images_in_flight_;
 
         bool framebuffer_resized_ = false;
+        bool framebuffer_resize_deferred_ = false;
+        bool framebuffer_resize_requires_recreate_ = false;
+        bool framebuffer_resize_allow_headroom_ = false;
+        bool framebuffer_resize_exact_after_interactive_ = false;
+        bool swapchain_extent_fixed_to_surface_ = false;
+        std::chrono::steady_clock::time_point framebuffer_resize_last_change_{};
+        std::chrono::steady_clock::time_point framebuffer_resize_last_recreate_{};
         bool frame_active_ = false;
         bool frame_rendering_active_ = false;
         bool frame_suboptimal_ = false;
         bool debug_utils_enabled_ = false;
         bool validation_enabled_ = false;
+        bool validation_errors_fatal_ = false;
         bool instance_external_memory_capabilities_enabled_ = false;
         bool instance_external_semaphore_capabilities_enabled_ = false;
+        bool instance_surface_maintenance_enabled_ = false;
         bool external_memory_interop_enabled_ = false;
         bool external_semaphore_interop_enabled_ = false;
         bool external_memory_dedicated_allocation_enabled_ = false;
+        bool swapchain_maintenance1_enabled_ = false;
+        bool swapchain_present_scaling_enabled_ = false;
         bool has_push_descriptor_ = false;
-        bool has_shader_object_ = false;
         bool has_float16_storage_ = false;
-        bool has_extended_dynamic_state3_ = false;
-        bool has_cooperative_matrix_ = false;
         bool has_host_image_copy_ = false;
-        bool has_descriptor_indexing_ = false;
-        PFN_vkSetDebugUtilsObjectNameEXT vk_set_debug_utils_object_name_ = nullptr;
+        bool has_fill_mode_non_solid_ = false;
+        bool has_wide_lines_ = false;
+        std::array<float, 2> line_width_range_{1.0f, 1.0f};
+        lfs::rendering::VulkanDebugNameWriter debug_name_writer_;
         PFN_vkCmdPushDescriptorSetKHR vk_cmd_push_descriptor_set_ = nullptr;
         uint32_t active_image_index_ = 0;
         std::size_t frame_index_ = 0;

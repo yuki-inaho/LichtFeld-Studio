@@ -40,6 +40,8 @@ namespace lfs::io {
         const uint8_t* currentFrameData() const;
         int width() const;
         int height() const;
+        int sourceWidth() const;
+        int sourceHeight() const;
 
         double currentTime() const;
         double duration() const;
@@ -49,6 +51,9 @@ namespace lfs::io {
 
         // Thumbnail generation (seeks and decodes single frame)
         std::vector<uint8_t> getThumbnail(double time, int max_width);
+
+        // Detected rotation from video metadata (0, 90, 180, 270)
+        int rotation() const;
 
     private:
         class Impl;

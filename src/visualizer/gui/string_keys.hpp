@@ -73,22 +73,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* BUILD_TYPE = "about.build_info.build_type";
             inline constexpr const char* PLATFORM = "about.build_info.platform";
         } // namespace BuildInfo
-
-        namespace BuildType {
-            inline constexpr const char* DEBUG = "about.build_type.debug";
-            inline constexpr const char* RELEASE = "about.build_type.release";
-        } // namespace BuildType
-
-        namespace Platform {
-            inline constexpr const char* WINDOWS = "about.platform.windows";
-            inline constexpr const char* LINUX = "about.platform.linux";
-            inline constexpr const char* UNKNOWN = "about.platform.unknown";
-        } // namespace Platform
-
-        namespace Interop {
-            inline constexpr const char* ENABLED = "about.interop.enabled";
-            inline constexpr const char* DISABLED = "about.interop.disabled";
-        } // namespace Interop
     } // namespace About
 
     namespace Training {
@@ -146,14 +130,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* SH_UPGRADE_EVERY = "training.refinement.sh_upgrade_every";
         } // namespace Refinement
 
-        namespace Mask {
-            inline constexpr const char* INVERT = "training.mask.invert";
-            inline constexpr const char* THRESHOLD = "training.mask.threshold";
-            inline constexpr const char* PENALTY_WEIGHT = "training.mask.penalty_weight";
-            inline constexpr const char* PENALTY_POWER = "training.mask.penalty_power";
-            inline constexpr const char* NO_MASKS = "training.mask.no_masks";
-        } // namespace Mask
-
         namespace Bilateral {
             inline constexpr const char* GRID_X = "training.bilateral.grid_x";
             inline constexpr const char* GRID_Y = "training.bilateral.grid_y";
@@ -205,7 +181,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* ITERATIONS = "training.tooltip.iterations";
             inline constexpr const char* MAX_GAUSSIANS = "training.tooltip.max_gaussians";
             inline constexpr const char* SH_DEGREE = "training.tooltip.sh_degree";
-            inline constexpr const char* TILE_MODE = "training.tooltip.tile_mode";
             inline constexpr const char* STEPS_SCALER = "training.tooltip.steps_scaler";
             inline constexpr const char* BILATERAL_GRID = "training.tooltip.bilateral_grid";
             inline constexpr const char* MASK_MODE = "training.tooltip.mask_mode";
@@ -511,6 +486,8 @@ namespace lichtfeld::Strings {
         inline constexpr const char* POLYGON_SELECTION = "toolbar.polygon_selection";
         inline constexpr const char* LASSO_SELECTION = "toolbar.lasso_selection";
         inline constexpr const char* RING_SELECTION = "toolbar.ring_selection";
+        inline constexpr const char* BOX_SELECTION = "toolbar.box_selection";
+        inline constexpr const char* SPHERE_SELECTION = "toolbar.sphere_selection";
         inline constexpr const char* LOCAL_SPACE = "toolbar.local_space";
         inline constexpr const char* WORLD_SPACE = "toolbar.world_space";
         inline constexpr const char* ORIGIN_PIVOT = "toolbar.origin_pivot";
@@ -548,19 +525,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* RESET_TRANSFORM = "transform.reset_transform";
         inline constexpr const char* NODES_SELECTED = "transform.nodes_selected";
     } // namespace Transform
-
-    namespace CropBox {
-        inline constexpr const char* TITLE = "cropbox.title";
-        inline constexpr const char* NOT_VISIBLE = "cropbox.not_visible";
-        inline constexpr const char* NO_SELECTION = "cropbox.no_selection";
-        inline constexpr const char* INVALID = "cropbox.invalid";
-        inline constexpr const char* POSITION = "cropbox.position";
-        inline constexpr const char* ROTATION = "cropbox.rotation";
-        inline constexpr const char* SIZE = "cropbox.size";
-        inline constexpr const char* APPEARANCE = "cropbox.appearance";
-        inline constexpr const char* LINE_WIDTH = "cropbox.line_width";
-        inline constexpr const char* INSTRUCTIONS = "cropbox.instructions";
-    } // namespace CropBox
 
     namespace Ellipsoid {
         inline constexpr const char* TITLE = "ellipsoid.title";
@@ -676,11 +640,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* EXPORT_MERGED = "export_dialog.export_merged";
     } // namespace ExportDialog
 
-    namespace SelectionGroup {
-        inline constexpr const char* LOCK = "selection_group.lock";
-        inline constexpr const char* UNLOCK = "selection_group.unlock";
-    } // namespace SelectionGroup
-
     namespace Progress {
         inline constexpr const char* LOSS = "progress.loss";
         inline constexpr const char* GAUSSIANS_COUNT = "progress.gaussians_count";
@@ -739,7 +698,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* ITERATIONS = "training_params.iterations";
         inline constexpr const char* MAX_GAUSSIANS = "training_params.max_gaussians";
         inline constexpr const char* SH_DEGREE = "training_params.sh_degree";
-        inline constexpr const char* TILE_MODE = "training_params.tile_mode";
         inline constexpr const char* STEPS_SCALER = "training_params.steps_scaler";
         inline constexpr const char* BILATERAL_GRID = "training_params.bilateral_grid";
         inline constexpr const char* MASK_MODE = "training_params.mask_mode";
@@ -833,6 +791,10 @@ namespace lichtfeld::Strings {
     namespace Startup {
         inline constexpr const char* SUPPORTED_BY = "startup.supported_by";
         inline constexpr const char* CLICK_TO_CONTINUE = "startup.click_to_continue";
+        inline constexpr const char* DISCOVERING_PLUGINS = "startup.discovering_plugins";
+        inline constexpr const char* LOADING_PLUGIN = "startup.loading_plugin";
+        inline constexpr const char* LOADED_PLUGINS = "startup.loaded_plugins";
+        inline constexpr const char* PLUGIN_LOADING_SKIPPED = "startup.plugin_loading_skipped";
         inline constexpr const char* DROP_FILES_TITLE = "startup.drop_files_title";
         inline constexpr const char* DROP_FILES_SUBTITLE = "startup.drop_files_subtitle";
         inline constexpr const char* DROP_FILES_HINT = "startup.drop_files_hint";
@@ -874,7 +836,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* FPS_LABEL = "video_extractor.fps_label";
         inline constexpr const char* FPS_TOOLTIP = "video_extractor.fps_tooltip";
         inline constexpr const char* EVERY_LABEL = "video_extractor.every_label";
-        inline constexpr const char* FRAMES_FORMAT = "video_extractor.frames_format";
+        inline constexpr const char* FRAMES_UNIT = "video_extractor.frames_unit";
         inline constexpr const char* INTERVAL_TOOLTIP = "video_extractor.interval_tooltip";
         inline constexpr const char* OUTPUT_FORMAT = "video_extractor.output_format";
         inline constexpr const char* FORMAT = "video_extractor.format";
@@ -894,15 +856,22 @@ namespace lichtfeld::Strings {
         inline constexpr const char* PATTERN_TOOLTIP = "video_extractor.pattern_tooltip";
         inline constexpr const char* EXAMPLE = "video_extractor.example";
         inline constexpr const char* START = "video_extractor.start";
+        inline constexpr const char* STOP = "video_extractor.stop";
         inline constexpr const char* CANCEL = "video_extractor.cancel";
         inline constexpr const char* SELECT_BOTH = "video_extractor.select_both";
         inline constexpr const char* EXTRACTING = "video_extractor.extracting";
         inline constexpr const char* STARTING = "video_extractor.starting";
         inline constexpr const char* COMPLETE = "video_extractor.complete";
         inline constexpr const char* EXTRACTED = "video_extractor.extracted";
+        inline constexpr const char* STOPPED = "video_extractor.stopped";
         inline constexpr const char* OK = "video_extractor.ok";
         inline constexpr const char* ERROR_MSG = "video_extractor.error";
         inline constexpr const char* DISMISS = "video_extractor.dismiss";
+        inline constexpr const char* DISCARDED_FORMAT = "video_extractor.discarded_format";
+        inline constexpr const char* ALL = "all";
+        inline constexpr const char* CANDIDATES_READOUT_FMT = "video_extractor.candidates_readout_fmt";
+        inline constexpr const char* SHARPNESS_MODE_DESC_THRESHOLD = "video_extractor.sharpness_mode_desc_threshold";
+        inline constexpr const char* SHARPNESS_MODE_DESC_WINDOW = "video_extractor.sharpness_mode_desc_window";
     } // namespace VideoExtractor
 
     namespace Mesh2Splat {

@@ -14,6 +14,8 @@ target_include_directories(lfs_vulkan_rasterizer
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/core/include>
 )
 
 target_link_libraries(lfs_vulkan_rasterizer
@@ -65,6 +67,24 @@ find_program(GLSLANG
 message(STATUS "vulkan: slangc=${SLANGC}")
 message(STATUS "vulkan: glslang=${GLSLANG}")
 
+if(LFS_ENABLE_VULKAN_VALIDATION)
+        set(_VULKAN_SPIRV_TOOLS_TRIPLET "${VCPKG_HOST_TRIPLET}")
+        if(NOT _VULKAN_SPIRV_TOOLS_TRIPLET)
+                set(_VULKAN_SPIRV_TOOLS_TRIPLET "${VCPKG_TARGET_TRIPLET}")
+        endif()
+        find_program(_VULKAN_SPIRV_VAL
+                NAMES spirv-val
+                HINTS
+                        ${CMAKE_PREFIX_PATH}
+                        ${CMAKE_PREFIX_PATH}/tools/spirv-tools
+                        ${VCPKG_INSTALLED_DIR}/${_VULKAN_SPIRV_TOOLS_TRIPLET}/tools/spirv-tools
+                PATH_SUFFIXES tools/spirv-tools
+                NO_CACHE
+                REQUIRED
+        )
+        message(STATUS "vulkan: spirv-val=${_VULKAN_SPIRV_VAL}")
+endif()
+
 set(_VULKAN_SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/shader/src)
 set(_VULKAN_GENERATED_OUT ${LFS_VULKAN_RASTERIZER_SPV_DIR}/generated)
 set(_VULKAN_RADIX_OUT ${LFS_VULKAN_RASTERIZER_SPV_DIR}/radix_sort)
@@ -72,7 +92,10 @@ set(_VULKAN_RADIX_OUT ${LFS_VULKAN_RASTERIZER_SPV_DIR}/radix_sort)
 file(MAKE_DIRECTORY ${_VULKAN_GENERATED_OUT})
 file(MAKE_DIRECTORY ${_VULKAN_RADIX_OUT})
 
-file(GLOB _VULKAN_SLANG_ALL ${_VULKAN_SHADER_SRC}/slang/*.slang)
+file(GLOB _VULKAN_SLANG_ALL
+        ${_VULKAN_SHADER_SRC}/slang/*.slang
+        ${_VULKAN_SHADER_SRC}/slang/*.inc
+)
 set(_VULKAN_RADIX_DEPS
         ${_VULKAN_SHADER_SRC}/radix_sort/config.glsl
 )
@@ -84,6 +107,14 @@ set(_VULKAN_SLANG_FLAGS
         -line-directive-mode none
         -target spirv
 )
+set(_VULKAN_GLSL_FLAGS
+        -V
+        --target-env vulkan1.2
+)
+if(LFS_ENABLE_VULKAN_SHADER_DEBUG_INFO)
+        list(APPEND _VULKAN_SLANG_FLAGS -g3)
+        list(APPEND _VULKAN_GLSL_FLAGS -gVS)
+endif()
 
 set(VULKAN_RASTERIZER_SHADER_OUTPUTS "")
 
@@ -93,6 +124,12 @@ function(_vulkan_add_slang_shader OUT_NAME SRC_FILE)
                 list(APPEND _defs "-D${D}")
         endforeach()
         set(_out ${_VULKAN_GENERATED_OUT}/${OUT_NAME}.spv)
+        set(_spirv_validation)
+        set(_spirv_validation_dependency)
+        if(_VULKAN_SPIRV_VAL)
+                set(_spirv_validation COMMAND ${_VULKAN_SPIRV_VAL} ${_out})
+                set(_spirv_validation_dependency ${_VULKAN_SPIRV_VAL})
+        endif()
         add_custom_command(
                 OUTPUT ${_out}
                 COMMAND ${SLANGC}
@@ -101,7 +138,8 @@ function(_vulkan_add_slang_shader OUT_NAME SRC_FILE)
                         ${_defs}
                         -I${_VULKAN_SHADER_SRC}/slang
                         -o ${_out}
-                DEPENDS ${_VULKAN_SLANG_ALL}
+                ${_spirv_validation}
+                DEPENDS ${_VULKAN_SLANG_ALL} ${_spirv_validation_dependency}
                 COMMENT "slangc ${OUT_NAME}.spv"
                 VERBATIM
         )
@@ -114,15 +152,21 @@ function(_vulkan_add_glsl_shader OUT_NAME SRC_FILE)
                 list(APPEND _defs "-D${D}")
         endforeach()
         set(_out ${_VULKAN_RADIX_OUT}/${OUT_NAME}.spv)
+        set(_spirv_validation)
+        set(_spirv_validation_dependency)
+        if(_VULKAN_SPIRV_VAL)
+                set(_spirv_validation COMMAND ${_VULKAN_SPIRV_VAL} ${_out})
+                set(_spirv_validation_dependency ${_VULKAN_SPIRV_VAL})
+        endif()
         add_custom_command(
                 OUTPUT ${_out}
                 COMMAND ${GLSLANG}
-                        -V
-                        --target-env vulkan1.2
+                        ${_VULKAN_GLSL_FLAGS}
                         ${_defs}
                         ${_VULKAN_SHADER_SRC}/radix_sort/${SRC_FILE}
                         -o ${_out}
-                DEPENDS ${_VULKAN_SHADER_SRC}/radix_sort/${SRC_FILE} ${_VULKAN_RADIX_DEPS}
+                ${_spirv_validation}
+                DEPENDS ${_VULKAN_SHADER_SRC}/radix_sort/${SRC_FILE} ${_VULKAN_RADIX_DEPS} ${_spirv_validation_dependency}
                 COMMENT "glslang ${OUT_NAME}.spv"
                 VERBATIM
         )
@@ -150,10 +194,14 @@ _vulkan_add_slang_shader(prepare_tile_sort         prepare_tile_sort.slang)
 _vulkan_add_slang_shader(compact_visible_primitives compact_visible_primitives.slang)
 _vulkan_add_slang_shader(lod_map_indices           lod_map_indices.slang)
 _vulkan_add_slang_shader(lod_select_threshold      lod_select_threshold.slang)
+_vulkan_add_slang_shader(lod_compact_touch        lod_compact_touch.slang)
 
 # vertex_shader.slang → projection_forward variants
 _vulkan_add_slang_shader(projection_forward        vertex_shader.slang EXPORT_MODE=0)
 _vulkan_add_slang_shader(projection_forward_3dgut  vertex_shader.slang EXPORT_MODE=0 LFS_3DGUT_PROJECTION=1)
+# Canonical quantized LOD pool variants (lod_pool_quant.hpp)
+_vulkan_add_slang_shader(projection_forward_quant       vertex_shader.slang EXPORT_MODE=0 LFS_QUANT_POOL=1)
+_vulkan_add_slang_shader(projection_forward_quant_3dgut vertex_shader.slang EXPORT_MODE=0 LFS_3DGUT_PROJECTION=1 LFS_QUANT_POOL=1)
 
 # selection_mask.slang → compact 1-byte-per-splat brush/rectangle/polygon masks
 _vulkan_add_slang_shader(selection_mask            selection_mask.slang)
@@ -184,6 +232,7 @@ _vulkan_add_slang_shader(compose_tile_batches_plain      tile_batch_shader.slang
 _vulkan_add_slang_shader(cull_splats                  cull_splats.slang EXPORT_MODE=0 CULL_ENTRY=1)
 _vulkan_add_slang_shader(cull_prepare                 cull_splats.slang EXPORT_MODE=0 CULL_ENTRY=2)
 _vulkan_add_slang_shader(projection_forward_survivors vertex_shader.slang EXPORT_MODE=0 LFS_PROJECTION_SURVIVORS=1)
+_vulkan_add_slang_shader(projection_forward_quant_survivors vertex_shader.slang EXPORT_MODE=0 LFS_PROJECTION_SURVIVORS=1 LFS_QUANT_POOL=1)
 _vulkan_add_slang_shader(prepare_visible_chain        prepare_visible_chain.slang)
 _vulkan_add_slang_shader(copy_visible_indices         copy_visible_indices.slang)
 _vulkan_add_slang_shader(cumsum_block_scan_indirect        cumsum.slang CUMSUM_PHASE=1 CUMSUM_INDIRECT=1)
@@ -205,12 +254,9 @@ _vulkan_add_slang_shader(macro_compose          macro_compose.slang EXPORT_MODE=
 _vulkan_add_slang_shader(macro_compose_overlays macro_compose.slang EXPORT_MODE=0 LFS_RASTER_OVERLAYS=1)
 
 # Radix sort GLSL .comp
-_vulkan_add_glsl_shader(upsweep    upsweep.comp)
-_vulkan_add_glsl_shader(spine      spine.comp)
-_vulkan_add_glsl_shader(downsweep  downsweep.comp)
-_vulkan_add_glsl_shader(upsweep_indirect    upsweep.comp   RADIX_SORT_COUNT_BUFFER=1)
-_vulkan_add_glsl_shader(spine_indirect      spine.comp     RADIX_SORT_COUNT_BUFFER=1)
-_vulkan_add_glsl_shader(downsweep_indirect  downsweep.comp RADIX_SORT_COUNT_BUFFER=1)
+_vulkan_add_glsl_shader(upsweep_indirect    upsweep.comp)
+_vulkan_add_glsl_shader(spine_indirect      spine.comp)
+_vulkan_add_glsl_shader(downsweep_indirect  downsweep.comp)
 
 add_custom_target(lfs_vulkan_rasterizer_shaders DEPENDS ${VULKAN_RASTERIZER_SHADER_OUTPUTS})
 add_dependencies(lfs_vulkan_rasterizer lfs_vulkan_rasterizer_shaders)

@@ -9,6 +9,7 @@
 #include "core/splat_data.hpp"
 #include "indicators.hpp"
 #include "io/exporter.hpp"
+#include "io/formats/rad.hpp"
 #include "io/loader.hpp"
 #include "io/ply_to_rad_lod.hpp"
 #include "rendering/mesh2splat.hpp"
@@ -95,6 +96,12 @@ namespace lfs::app {
             case param::OutputFormat::RAD: return ".rad";
             }
             return ".ply";
+        }
+
+        std::uint32_t radChunkSizeForMode(const param::RadExportMode mode) {
+            return mode == param::RadExportMode::Stream
+                       ? lfs::io::kRadStreamableChunkSplats
+                       : lfs::io::kRadNativeChunkSplats;
         }
 
         std::filesystem::path generateOutputPath(
@@ -216,6 +223,7 @@ namespace lfs::app {
             const std::filesystem::path& output,
             const param::OutputFormat format,
             const int sog_iterations,
+            const param::RadExportMode rad_export_mode,
             const lfs::io::ExportProgressCallback& progress = nullptr) {
             switch (format) {
             case param::OutputFormat::PLY:
@@ -231,7 +239,11 @@ namespace lfs::app {
             case param::OutputFormat::USDC:
                 return lfs::io::save_usd(splat, {.output_path = output, .progress_callback = progress});
             case param::OutputFormat::RAD:
-                return lfs::io::save_rad(splat, {.output_path = output, .progress_callback = progress});
+                return lfs::io::save_rad(splat, {
+                                                    .output_path = output,
+                                                    .chunk_size = radChunkSizeForMode(rad_export_mode),
+                                                    .progress_callback = progress,
+                                                });
             }
             return lfs::io::save_ply(splat, {.output_path = output, .binary = true, .progress_callback = progress});
         }
@@ -244,15 +256,50 @@ namespace lfs::app {
             return ext == ".ply";
         }
 
+        bool isRadExtension(const std::filesystem::path& path) {
+            auto ext = path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](const unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return ext == ".rad";
+        }
+
+        // RAD LOD -> RAD LOD can preserve node order and tree links while
+        // re-encoding only the file chunk profile selected by the caller.
+        bool rechunkRadFile(
+            const std::filesystem::path& input,
+            const std::filesystem::path& output,
+            const std::uint32_t target_chunk_size) {
+            std::println("Re-chunking RAD LOD: {} -> {} ({}-splat chunks)",
+                         path_to_utf8(input), path_to_utf8(output), target_chunk_size);
+
+            ConvertProgressBar bar;
+            const auto result = lfs::io::rechunk_rad_lod(
+                input, output, target_chunk_size, [&bar](const float progress) {
+                    return bar.report(progress, "re-chunk");
+                });
+            if (!result) {
+                bar.abort();
+                LOG_ERROR("RAD re-chunk failed: {}", result.error().format());
+                std::println(stderr, "  Error: {}", result.error().message);
+                return false;
+            }
+            if (const auto sidecar = lfs::io::build_rad_meta_sidecar(output); !sidecar) {
+                bar.abort();
+                LOG_ERROR("Sidecar build failed: {}", sidecar.error().format());
+                std::println(stderr, "  Error: {}", sidecar.error().message);
+                return false;
+            }
+            bar.complete();
+            std::println("  Done");
+            return true;
+        }
+
         // Streaming path for PLYs where the monolithic in-memory LOD build is
         // the wrong tool: above one bucket of splats the bucketed converter is
         // much faster (parallel subtrees, small merge neighborhoods), and it
         // is mandatory once the workset would not fit in RAM.
         bool shouldStreamLodConvert(const std::filesystem::path& input) {
-            if (const char* const env = std::getenv("LFS_RAD_STREAM_LOD");
-                env != nullptr && env[0] != '\0') {
-                return env[0] != '0';
-            }
             const auto info = lfs::io::probe_ply_gaussians(input);
             if (!info) {
                 return false;
@@ -283,12 +330,19 @@ namespace lfs::app {
 
         bool streamLodConvertFile(
             const std::filesystem::path& input,
-            const std::filesystem::path& output) {
+            const std::filesystem::path& output,
+            const param::ConvertParameters& params) {
             std::println("Converting (out-of-core LOD): {} -> {}",
                          path_to_utf8(input), path_to_utf8(output));
 
             ConvertProgressBar bar;
             lfs::io::PlyToRadLodOptions options;
+            options.tiles_x = params.tiles_x;
+            options.tiles_y = params.tiles_y;
+            options.chunk_size = radChunkSizeForMode(params.rad_export_mode);
+            options.builder = params.lod_builder == param::LodBuilder::OCTREE
+                                  ? lfs::io::LodBuilder::kOctree
+                                  : lfs::io::LodBuilder::kBhatt;
             options.progress = [&bar](const float progress, const std::string& stage) {
                 return bar.report(progress, stage);
             };
@@ -310,9 +364,31 @@ namespace lfs::app {
             const std::filesystem::path& output,
             const param::ConvertParameters& params) {
 
+            const bool tiled = params.tiles_x > 1 || params.tiles_y > 1;
+            if (tiled && (params.format != param::OutputFormat::RAD || !isPlyExtension(input))) {
+                LOG_ERROR("--tiles requires a PLY input and RAD output: {}", path_to_utf8(input));
+                std::println(stderr, "  Error: --tiles requires a PLY input and RAD output");
+                return false;
+            }
+
+            if (params.format == param::OutputFormat::RAD && isRadExtension(input)) {
+                const auto lod_chunk_size = lfs::io::rad_lod_file_chunk_size(input);
+                if (!lod_chunk_size) {
+                    LOG_ERROR("RAD probe failed: {}", lod_chunk_size.error());
+                    std::println(stderr, "  Error: {}", lod_chunk_size.error());
+                    return false;
+                }
+                if (*lod_chunk_size) {
+                    return rechunkRadFile(input, output, radChunkSizeForMode(params.rad_export_mode));
+                }
+            }
+
+            // An explicit non-default builder always takes the bucketed
+            // converter; the monolithic in-memory path is bhatt-only.
             if (params.format == param::OutputFormat::RAD && isPlyExtension(input) &&
-                shouldStreamLodConvert(input)) {
-                return streamLodConvertFile(input, output);
+                (tiled || params.lod_builder != param::LodBuilder::BHATT ||
+                 shouldStreamLodConvert(input))) {
+                return streamLodConvertFile(input, output, params);
             }
 
             std::println("Converting: {} -> {}", path_to_utf8(input), path_to_utf8(output));
@@ -343,6 +419,7 @@ namespace lfs::app {
             ConvertProgressBar bar;
             const auto result = saveSplat(
                 *splat, output, params.format, params.sog_iterations,
+                params.rad_export_mode,
                 [&bar](const float progress, const std::string& stage) {
                     return bar.report(progress, stage);
                 });
@@ -402,7 +479,8 @@ namespace lfs::app {
             bool ok = true;
             for (const auto& output : outputs) {
                 std::println("  Saving: {}", path_to_utf8(output.path));
-                const auto result = saveSplat(**splat, output.path, output.format, params.sog_iterations);
+                const auto result = saveSplat(**splat, output.path, output.format, params.sog_iterations,
+                                              param::RadExportMode::Stream);
                 if (!result) {
                     LOG_ERROR("Save failed: {}", result.error().format());
                     std::println(stderr, "  Error: {}", result.error().message);
