@@ -223,7 +223,8 @@ set_target_properties(lfs_py PROPERTIES
     LINKER_LANGUAGE CXX
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN ON
+    # Keep USD VtArray inline instantiations visible to the vcpkg USD DSOs.
+    VISIBILITY_INLINES_HIDDEN OFF
     OUTPUT_NAME lichtfeld
 )
 

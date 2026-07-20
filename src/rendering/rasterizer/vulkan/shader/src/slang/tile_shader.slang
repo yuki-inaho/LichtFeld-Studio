@@ -118,7 +118,7 @@ void main(
     rect.max_x = (uint16_t)rect_tile_space[2*primitive_idx+1];
     rect.max_y = (uint16_t)(rect_tile_space[2*primitive_idx+1] >> 16);
   #else
-    rectangle rect = reinterpret<rectangle>(rect_tile_space[primitive_idx]);
+    rectangle rect = unpack_rectangle(rect_tile_space[primitive_idx]);
   #endif
 
 #if TILE_CULLING_MODE == 0 || TILE_CULLING_MODE == 1

@@ -23,6 +23,30 @@ struct rectangle {
     uint16_t max_y;
 };
 
+// Keep the native int64 rectangle layout identical to the emulated-int64
+// path without relying on Slang's struct/scalar reinterpret AnyValue support.
+// Older Slang releases reject reinterpret<rectangle>(int64_t), while explicit
+// bit packing is accepted by both old and new compilers.
+[ForceInline]
+rectangle unpack_rectangle(int64_t packed) {
+    const uint64_t bits = uint64_t(packed);
+    rectangle rect;
+    rect.min_x = uint16_t(bits & uint64_t(0xffff));
+    rect.min_y = uint16_t((bits >> 16) & uint64_t(0xffff));
+    rect.max_x = uint16_t((bits >> 32) & uint64_t(0xffff));
+    rect.max_y = uint16_t((bits >> 48) & uint64_t(0xffff));
+    return rect;
+}
+
+[ForceInline]
+int64_t pack_rectangle(rectangle rect) {
+    uint64_t bits = uint64_t(rect.min_x);
+    bits |= uint64_t(rect.min_y) << 16;
+    bits |= uint64_t(rect.max_x) << 32;
+    bits |= uint64_t(rect.max_y) << 48;
+    return int64_t(bits);
+}
+
 enum CameraModel {
     PINHOLE = 0,
     ORTHO = 1,

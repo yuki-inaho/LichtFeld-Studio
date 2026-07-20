@@ -941,7 +941,7 @@ void main(
     out_rect_tile_space[2*out_idx+0] = (int32_t)rect_tile_space.min_x | ((int32_t)rect_tile_space.min_y << 16);
     out_rect_tile_space[2*out_idx+1] = (int32_t)rect_tile_space.max_x | ((int32_t)rect_tile_space.max_y << 16);
   #else
-    out_rect_tile_space[out_idx] = reinterpret<int64_t>(rect_tile_space);
+    out_rect_tile_space[out_idx] = pack_rectangle(rect_tile_space);
   #endif
 
     // Same radial depth key as the N-wide path; ids are slots, so after the
@@ -960,7 +960,7 @@ void main(
     out_rect_tile_space[2*out_idx+0] = (int32_t)rect_tile_space.min_x | ((int32_t)rect_tile_space.min_y << 16);
     out_rect_tile_space[2*out_idx+1] = (int32_t)rect_tile_space.max_x | ((int32_t)rect_tile_space.max_y << 16);
   #else
-    out_rect_tile_space[out_idx] = reinterpret<int64_t>(rect_tile_space);
+    out_rect_tile_space[out_idx] = pack_rectangle(rect_tile_space);
   #endif
 
     if (n_tiles == 0) {
